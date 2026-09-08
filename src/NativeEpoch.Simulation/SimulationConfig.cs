@@ -7,17 +7,18 @@ public sealed record SimulationConfig
     public double FixedDeltaSeconds { get; init; } = 0.1;
     public int MaxPopulation { get; init; } = 20_000;
 
-    public double BodyMatter { get; init; } = 1.0;
+    public double CoreInitialMatter { get; init; } = 0.25;
     public double AncestorStoredMatter { get; init; } = 1.5;
     public double AncestorEnergy { get; init; } = 14.0;
     public double NewbornEnergy { get; init; } = 5.0;
     public double MaximumEnergy { get; init; } = 30.0;
-    public double MaximumStoredMatter { get; init; } = 2.0;
-    public double MatterUptakePerSecond { get; init; } = 0.16;
-    public double LightEnergyPerSecond { get; init; } = 2.0;
-    public double MaintenanceEnergyPerSecond { get; init; } = 0.45;
+    public double BaseStoredMatter { get; init; } = 1.0;
+    public double MatterUptakePerSurfacePerSecond { get; init; } = 0.10;
+    public double LightEnergyPerSurfacePerSecond { get; init; } = 1.45;
+    public double BaseMaintenanceEnergyPerSecond { get; init; } = 0.12;
+    public double GrowthMatterPerSecond { get; init; } = 0.18;
+    public double GrowthEnergyPerMatter { get; init; } = 1.5;
     public double ReproductionEnergyCost { get; init; } = 12.0;
-    public double ReproductionMatterCost { get; init; } = 1.0;
     public double ReproductionEnergyThreshold { get; init; } = 16.0;
     public double MaturityAgeSeconds { get; init; } = 6.0;
     public double ReproductionCooldownSeconds { get; init; } = 6.0;
@@ -34,17 +35,17 @@ public sealed record SimulationConfig
             throw new ArgumentOutOfRangeException(nameof(FixedDeltaSeconds));
         if (MaxPopulation < 1 || ancestorCount < 1 || ancestorCount > MaxPopulation)
             throw new ArgumentOutOfRangeException(nameof(ancestorCount));
-        if (BodyMatter <= 0.0 || ReproductionMatterCost != BodyMatter)
-            throw new InvalidOperationException("Phase 0 requires reproduction matter to equal newborn body matter.");
+        if (CoreInitialMatter <= 0.0)
+            throw new InvalidOperationException("A newborn core must contain positive matter.");
         if (ReproductionEnergyCost < NewbornEnergy)
             throw new InvalidOperationException("Reproduction must pay at least the newborn's starting energy.");
 
         double[] finitePositive =
         [
-            AncestorStoredMatter, AncestorEnergy, NewbornEnergy, MaximumEnergy,
-            MaximumStoredMatter, MatterUptakePerSecond, LightEnergyPerSecond,
-            MaintenanceEnergyPerSecond, ReproductionEnergyCost,
-            ReproductionMatterCost, ReproductionEnergyThreshold, MaturityAgeSeconds,
+            CoreInitialMatter, AncestorStoredMatter, AncestorEnergy, NewbornEnergy, MaximumEnergy,
+            BaseStoredMatter, MatterUptakePerSurfacePerSecond, LightEnergyPerSurfacePerSecond,
+            BaseMaintenanceEnergyPerSecond, GrowthMatterPerSecond, GrowthEnergyPerMatter,
+            ReproductionEnergyCost, ReproductionEnergyThreshold, MaturityAgeSeconds,
             ReproductionCooldownSeconds, MaximumAgeSeconds, NewbornOffsetRadius
         ];
 

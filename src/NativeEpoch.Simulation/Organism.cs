@@ -6,19 +6,23 @@ public struct Organism
 {
     public ulong Id;
     public ulong ParentId;
+    public int GenomeId;
     public Vector2 Position;
     public double AgeSeconds;
+    public double Maturity;
     public double Energy;
-    public double BodyMatter;
     public double StoredMatter;
     public double ReproductionCooldownSeconds;
+    public DevelopingBody Body;
 
     public readonly bool AllFinite =>
         float.IsFinite(Position.X) &&
         float.IsFinite(Position.Y) &&
         double.IsFinite(AgeSeconds) &&
+        double.IsFinite(Maturity) &&
         double.IsFinite(Energy) &&
-        double.IsFinite(BodyMatter) &&
         double.IsFinite(StoredMatter) &&
-        double.IsFinite(ReproductionCooldownSeconds);
+        double.IsFinite(ReproductionCooldownSeconds) &&
+        Maturity is >= 0.0 and <= 1.0 &&
+        Body is not null;
 }
