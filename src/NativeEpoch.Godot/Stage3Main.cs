@@ -209,6 +209,7 @@ public sealed partial class Stage3Main : Node3D
         _hud.MineralToolRequested += () => SetTool(ToolMode.Minerals);
         _hud.TemperatureToolRequested += () => SetTool(ToolMode.Temperature);
         _hud.HeatmapRequested += CycleHeatmap;
+        _hud.MediumDiagnosticRequested += MoveSelectedToLandDiagnostic;
         _hud.MorphologyLabRequested += OpenMorphologyLab;
     }
 
@@ -230,7 +231,7 @@ public sealed partial class Stage3Main : Node3D
         RefreshSnapshotAndWorld();
         RefreshStatistics();
         RefreshInspector();
-        _hud.UpdateStatus($"已载入 {label}。所有生命位置保持不变；发育和生命周期继续结算。");
+        _hud.UpdateStatus($"已载入 {label}。初始共同祖先只投放在有光浅水层；深度与生命周期继续结算。");
         UpdateModeLabel();
     }
 
@@ -294,6 +295,52 @@ public sealed partial class Stage3Main : Node3D
             $"({position.X:F1}, {position.Y:F1})，半径 {_brushRadius:F0}，{effect}。");
     }
 
+    private void MoveSelectedToLandDiagnostic()
+    {
+        if (_selectedId is null && _snapshot.Organisms.Count > 0)
+            _selectedId = _snapshot.Organisms[0].Id;
+        if (_selectedId is null)
+        {
+            _hud.UpdateStatus("人工水陆对照无法开始：当前没有存活个体。");
+            return;
+        }
+        NumericsVector2? land = null;
+        for (int y = 0; y <= 48 && land is null; y++) for (int x = 0; x <= 48; x++)
+        {
+            NumericsVector2 candidate = new(
+                _world.Config.WorldSize * x / 48f, _world.Config.WorldSize * y / 48f);
+            if (_world.Environment.Sample(candidate).WaterDepth <= 0.0)
+            { land = candidate; break; }
+        }
+        if (land is null || !_world.RelocateForMediumDiagnostic(_selectedId.Value, land.Value, 0))
+        {
+            _hud.UpdateStatus("人工水陆对照无法开始：地图没有陆地点或个体已死亡。");
+            return;
+        }
+        _paused = false;
+        _timeScale = 1;
+        _hud.SetPaused(false);
+        RefreshSnapshotAndWorld();
+        SelectAndFocus(_selectedId.Value);
+        _hud.UpdateStatus("人工诊断：已把选中个体移至陆地。观察含水、气侧摄氧、失水代价和受限移动；这不是自然上岸演化。");
+    }
+
+    private void SelectAndFocus(ulong organismId)
+    {
+        foreach (OrganismPresentationState organism in _snapshot.Organisms)
+        {
+            if (organism.Id != organismId) continue;
+            _cameraTarget = new Vector3(
+                organism.Position.X - (_world.Config.WorldSize * 0.5f),
+                LowPolyWorldRenderer.OrganismElevation(organism),
+                organism.Position.Y - (_world.Config.WorldSize * 0.5f));
+            _cameraDistance = Math.Min(_cameraDistance, 18f);
+            UpdateCameraTransform();
+            RefreshInspector();
+            return;
+        }
+    }
+
     private void SelectNearest(Vector2 screenPosition)
     {
         const float maximumScreenDistance = 28f;
@@ -303,7 +350,7 @@ public sealed partial class Stage3Main : Node3D
         {
             Vector3 worldPosition = new(
                 organism.Position.X - (_world.Config.WorldSize * 0.5f),
-                (float)organism.Environment.TerrainHeight + 0.5f,
+                LowPolyWorldRenderer.OrganismElevation(organism),
                 organism.Position.Y - (_world.Config.WorldSize * 0.5f));
             if (_camera.IsPositionBehind(worldPosition))
                 continue;
@@ -322,7 +369,7 @@ public sealed partial class Stage3Main : Node3D
             OrganismPresentationState organism = nearest.Value;
             _cameraTarget = new Vector3(
                 organism.Position.X - (_world.Config.WorldSize * 0.5f),
-                (float)organism.Environment.TerrainHeight + 0.6f,
+                LowPolyWorldRenderer.OrganismElevation(organism),
                 organism.Position.Y - (_world.Config.WorldSize * 0.5f));
             _cameraDistance = Math.Min(_cameraDistance, 18f);
             UpdateCameraTransform();
@@ -348,6 +395,8 @@ public sealed partial class Stage3Main : Node3D
         _hud.UpdateStatistics(
             $"步 {stats.StepIndex:N0} · {stats.SimulatedSeconds:F1}s · 存活 {stats.Population:N0} · " +
             $"出生/死亡 {stats.CumulativeBirths:N0}/{stats.CumulativeDeaths:N0}\n" +
+            $"死亡 损伤/夭折/衰老 {stats.DamageDeaths:N0}/{stats.JuvenileDeaths:N0}/{stats.SenescenceDeaths:N0} · " +
+            $"生物量 {stats.OrganismBodyMatter:F1} · 环境矿物 {stats.EnvironmentMinerals:F1} · 残骸/废物 {stats.EnvironmentDetritus + stats.EnvironmentMetabolicWaste:F1}\n" +
             $"基因组 {stats.GenomeCount:N0} · 身体区域 {stats.TotalBodyRegions:N0}（渲染实例 {_renderedRegions:N0}" +
             $"{(_worldRenderer.UsesSimplifiedProxies ? "，远景代理" : "，完整区域")}） · " +
             $"均速 {stats.AverageSpeed:F2} · 目标 {_timeScale:0}× / 实际 {_achievedScale:0.0}× · " +
@@ -379,6 +428,11 @@ public sealed partial class Stage3Main : Node3D
         }
 
         OrganismPresentationState organism = selected.Value;
+        string regionalInventory = string.Join("\n", organism.RegionInventories
+            .OrderBy(region => region.RegionId)
+            .Take(6)
+            .Select(region =>
+                $"  区 {region.RegionId}: 结构 {region.Matter:F3} / 底物 {region.Substrate:F3} / 氧 {region.Oxygen:F4} / 水 {region.Water:F3} / 能 {region.Energy:F3}"));
         _hud.UpdateInspector(
             $"ID {organism.Id} · 亲代 {organism.ParentId}\n" +
             $"基因组 {organism.GenomeId} · {organism.GenomeFingerprint:X16}\n" +
@@ -387,10 +441,16 @@ public sealed partial class Stage3Main : Node3D
             $"能量 {organism.Energy:F3} · 储存物质 {organism.StoredMatter:F3} · 繁殖冷却 {organism.ReproductionCooldownSeconds:F1}s\n" +
             $"身体物质 {organism.Body.TotalMatter:F3} · 质量 {organism.Body.PhysicalMass:F3} · 半径 {organism.Body.BoundingRadius:F3}\n" +
             $"摄光面 {organism.Body.LightCaptureSurface:F3} · 摄取面 {organism.Body.MatterUptakeSurface:F3} · 维护 {organism.Body.MaintenanceEnergyPerSecond:F3}/s\n" +
-            $"环境：高度 {organism.Environment.TerrainHeight:F2} · 水深 {organism.Environment.WaterDepth:F2}\n" +
-            $"温度 {organism.Environment.Temperature:F3} · 光 {organism.Environment.Light:F3} · 矿物 {organism.Environment.Minerals:F3} · 残骸 {organism.Environment.Detritus:F3}\n" +
+            $"介质 {(organism.Immersion >= 0.8 ? "水中" : organism.Immersion > 0.05 ? "水线" : "陆地")} · 个体深度 {organism.Depth:F2}/{organism.Environment.WaterDepth:F2} · 浸没 {organism.Immersion:P0}\n" +
+            $"含水 {organism.Hydration:P1} · 区域氧 {organism.InternalOxygen:F4}/{organism.OxygenCapacity:F4} · 本步摄氧/耗氧 {organism.OxygenUptakeLastStep:F5}/{organism.OxygenConsumedLastStep:F5}\n" +
+            $"代谢产能 {organism.MetabolicEnergyLastStep:F5} · 失水/压力代价 {organism.DehydrationCostLastStep:F5}\n" +
+            $"表面样本 外露/遮蔽 {organism.ExposedSurfaceSamples}/{organism.OccludedSurfaceSamples} · 水/气暴露面 {organism.WaterExposedArea:F3}/{organism.AirExposedArea:F3}\n" +
+            $"区域库存（最多显示 6 区）：\n{regionalInventory}\n" +
+            $"环境：海底 {organism.Environment.TerrainHeight:F2} · 压力 {organism.Environment.Pressure:F3} · 光 {organism.Environment.Light:F3}\n" +
+            $"溶解氧可用度 {organism.Environment.DissolvedOxygenAvailability:F3} · 空气氧可用度 {organism.Environment.AirOxygenAvailability:F3}（均为各介质内部无量纲势）\n" +
+            $"温度 {organism.Environment.Temperature:F3} · 矿物 {organism.Environment.Minerals:F3} · 代谢废物 {organism.Environment.MetabolicWaste:F3}\n" +
             $"速度 ({organism.Velocity.X:F2}, {organism.Velocity.Y:F2}) · 自推进 ({organism.Body.PropulsionVector.X:F3}, {organism.Body.PropulsionVector.Y:F3})\n" +
-            "运动：材料收缩与几何方向导出的有限自推进；无行为网络或目标追踪");
+            "2A 提示：当前移动仍是临时聚合自推进；局部连接传力将在 2B 验收门实现");
     }
 
     private void UpdateModeLabel()
@@ -520,7 +580,10 @@ public sealed partial class Stage3Main : Node3D
         float half = _world.Config.WorldSize * 0.5f;
         float worldX = Math.Clamp(_cameraTarget.X + half, 0f, _world.Config.WorldSize);
         float worldY = Math.Clamp(_cameraTarget.Z + half, 0f, _world.Config.WorldSize);
-        _cameraTarget.Y = (float)_world.Environment.Sample(new NumericsVector2(worldX, worldY)).TerrainHeight + 0.5f;
+        EnvironmentSample sample = _world.Environment.Sample(new NumericsVector2(worldX, worldY));
+        _cameraTarget.Y = sample.WaterDepth > 0.0
+            ? (float)sample.WaterSurface
+            : (float)sample.TerrainHeight + 0.5f;
     }
 
     private void ToggleFullscreen()
@@ -573,7 +636,7 @@ public sealed partial class Stage3Main : Node3D
         OrganismPresentationState targetOrganism = _snapshot.Organisms[0];
         _cameraTarget = new Vector3(
             targetOrganism.Position.X - (_world.Config.WorldSize * 0.5f),
-            (float)targetOrganism.Environment.TerrainHeight + 0.6f,
+            LowPolyWorldRenderer.OrganismElevation(targetOrganism),
             targetOrganism.Position.Y - (_world.Config.WorldSize * 0.5f));
         _cameraDistance = 48f;
         UpdateCameraTransform();
@@ -615,6 +678,11 @@ public sealed partial class Stage3Main : Node3D
         bool responsivePanels = mediumTool && !mediumInspector &&
             !narrowTool && !narrowInspector && wideTool && wideInspector;
         bool movementPaid = statistics.AverageSpeed > 0.0 && statistics.CumulativeMovementEnergy > 0.0;
+        bool aquaticDepthValid = _snapshot.Organisms.All(organism =>
+            organism.Environment.WaterDepth > 0.0 && organism.Depth > 0f &&
+            organism.Depth <= organism.Environment.WaterDepth + 1e-5);
+        double oxygenTolerance = Math.Max(1e-8, Math.Abs(statistics.InitialOxygen) * 1e-10);
+        bool oxygenBudget = Math.Abs(statistics.OxygenError) <= oxygenTolerance;
         bool passed =
             statistics.StepIndex == 81 &&
             statistics.Population >= 300 &&
@@ -629,7 +697,9 @@ public sealed partial class Stage3Main : Node3D
             rightDragRotates &&
             closeZoomAvailable &&
             responsivePanels &&
-            movementPaid;
+            movementPaid &&
+            aquaticDepthValid &&
+            oxygenBudget;
         GD.Print(
             $"STAGE3_SMOKE {(passed ? "PASS" : "FAIL")} " +
             $"step={statistics.StepIndex} population={statistics.Population} " +
@@ -638,7 +708,8 @@ public sealed partial class Stage3Main : Node3D
             $"forward_aligned={forwardAligned} w_forward={wMovesForward} s_backward={sMovesBackward} " +
             $"right_drag={rightDragRotates} close_zoom={closeZoomAvailable} responsive={responsivePanels} " +
             $"movement_paid={movementPaid} average_speed={statistics.AverageSpeed:F4} " +
-            $"matter_error={statistics.MatterError:E6}");
+            $"aquatic_depth={aquaticDepthValid} oxygen_budget={oxygenBudget} " +
+            $"matter_error={statistics.MatterError:E6} oxygen_error={statistics.OxygenError:E6}");
         GetTree().Quit(passed ? 0 : 1);
     }
 
@@ -649,7 +720,9 @@ public sealed partial class Stage3Main : Node3D
         HeatmapMode.Temperature => "温度",
         HeatmapMode.Light => "光照",
         HeatmapMode.Minerals => "矿物",
-        _ => "残骸"
+        HeatmapMode.Detritus => "残骸",
+        HeatmapMode.DissolvedOxygen => "溶解氧",
+        _ => "空气氧"
     };
 
     private enum ToolMode

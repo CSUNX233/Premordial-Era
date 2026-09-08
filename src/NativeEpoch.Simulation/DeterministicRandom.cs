@@ -53,10 +53,14 @@ internal sealed class RandomStreams
         Placement = new DeterministicRandom(worldSeed ^ 0xBB67AE8584CAA73BUL, 2);
         Reproduction = new DeterministicRandom(worldSeed ^ 0x3C6EF372FE94F82BUL, 3);
         Mutation = new DeterministicRandom(worldSeed ^ 0xA54FF53A5F1D36F1UL, 4);
+        ControllerMutation = new DeterministicRandom(worldSeed ^ 0x510E527FADE682D1UL, 5);
+        Mortality = new DeterministicRandom(worldSeed ^ 0x1F83D9ABFB41BD6BUL, 6);
     }
 
     public DeterministicRandom Environment { get; }
     public DeterministicRandom Placement { get; }
     public DeterministicRandom Reproduction { get; }
     public DeterministicRandom Mutation { get; }
+    public DeterministicRandom ControllerMutation { get; }
+    public DeterministicRandom Mortality { get; }
 }

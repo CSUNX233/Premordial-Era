@@ -23,6 +23,7 @@ public sealed partial class Stage3Hud : CanvasLayer
     public event Action? MineralToolRequested;
     public event Action? TemperatureToolRequested;
     public event Action? HeatmapRequested;
+    public event Action? MediumDiagnosticRequested;
     public event Action? MorphologyLabRequested;
 
     public override void _Ready()
@@ -146,7 +147,8 @@ public sealed partial class Stage3Hud : CanvasLayer
         AddButton(root, "选择工具 [1]", "点击最近个体，在右侧显示它的快照", () => SelectToolRequested?.Invoke());
         AddButton(root, "矿物笔刷 [2]", "连续圆形衰减；左键增加，Shift+左键移除", () => MineralToolRequested?.Invoke());
         AddButton(root, "温度笔刷 [3]", "连续圆形衰减；左键加热，Shift+左键降温", () => TemperatureToolRequested?.Invoke());
-        AddButton(root, "切换热力图 [H]", "自然→高度→温度→光照→矿物→残骸", () => HeatmapRequested?.Invoke());
+        AddButton(root, "切换热力图 [H]", "自然→高度→温度→光照→矿物→残骸→溶解氧→空气氧", () => HeatmapRequested?.Invoke());
+        AddButton(root, "水陆交换对照（人工）", "把选中个体移到陆地；只用于观察失水与介质约束，不代表自然演化", () => MediumDiagnosticRequested?.Invoke());
         AddButton(root, "形态样本台 A [F2]", "打开独立人工几何测试；不会写入模拟", () => MorphologyLabRequested?.Invoke());
 
         _status = new Label
@@ -160,7 +162,7 @@ public sealed partial class Stage3Hud : CanvasLayer
 
         Label help = new()
         {
-            Text = "W前进 / S后退 · 右键拖动旋转 · 滚轮缩放\n[ / ] 调笔刷 · F2 形态样本台 · F11 全屏 · Tab 隐藏界面\n\n基础运动由材料、几何和能量结算；没有阶段 2 的行为网络。",
+            Text = "W前进 / S后退 · 右键拖动旋转 · 滚轮缩放\n[ / ] 调笔刷 · F2 形态样本台 · F11 全屏 · Tab 隐藏界面\n\n2A 已接入水深、分介质氧和区域运输；基础运动仍等待 2B 局部连接传力。",
             AutowrapMode = TextServer.AutowrapMode.WordSmart
         };
         help.AddThemeColorOverride("font_color", new Color("aebccc"));

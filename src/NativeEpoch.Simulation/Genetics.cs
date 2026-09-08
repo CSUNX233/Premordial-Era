@@ -6,7 +6,63 @@ public enum MutationKind
     Point,
     DuplicateRegion,
     DeleteRegion,
-    ReconnectRegion
+    ReconnectRegion,
+    MetabolicPoint,
+    ControllerPoint,
+    ControllerAddNode,
+    ControllerDeleteNode,
+    ControllerReconnect
+}
+
+public readonly record struct MetabolicGene(
+    double OxygenUseFraction,
+    double OxygenCatalysis,
+    double WaterRetention,
+    double OsmoticTolerance)
+{
+    public static MetabolicGene AquaticAncestor => new(0.35, 0.48, 0.20, 0.72);
+
+    public bool AllFinite =>
+        double.IsFinite(OxygenUseFraction) &&
+        double.IsFinite(OxygenCatalysis) &&
+        double.IsFinite(WaterRetention) &&
+        double.IsFinite(OsmoticTolerance);
+}
+
+public readonly record struct ControllerNodeGene(
+    double Bias,
+    double LightWeight,
+    double TemperatureWeight,
+    double PressureWeight,
+    double EnergyWeight,
+    double MatterWeight,
+    double HydrationWeight,
+    double ContactWeight,
+    double SelfMemoryWeight,
+    int RecurrentSourceIndex,
+    double RecurrentWeight,
+    double ContractionOutputWeight,
+    double PermeabilityOutputWeight,
+    double SecretionOutputWeight,
+    double VerticalContractionOutputWeight,
+    double LateralContractionOutputWeight)
+{
+    public bool AllFinite =>
+        double.IsFinite(Bias) &&
+        double.IsFinite(LightWeight) &&
+        double.IsFinite(TemperatureWeight) &&
+        double.IsFinite(PressureWeight) &&
+        double.IsFinite(EnergyWeight) &&
+        double.IsFinite(MatterWeight) &&
+        double.IsFinite(HydrationWeight) &&
+        double.IsFinite(ContactWeight) &&
+        double.IsFinite(SelfMemoryWeight) &&
+        double.IsFinite(RecurrentWeight) &&
+        double.IsFinite(ContractionOutputWeight) &&
+        double.IsFinite(PermeabilityOutputWeight) &&
+        double.IsFinite(SecretionOutputWeight) &&
+        double.IsFinite(VerticalContractionOutputWeight) &&
+        double.IsFinite(LateralContractionOutputWeight);
 }
 
 public readonly record struct RegionGene(
@@ -51,18 +107,29 @@ public sealed class Genome
 {
     private readonly RegionGene[] _regions;
     private readonly IReadOnlyList<RegionGene> _readOnlyRegions;
+    private readonly ControllerNodeGene[] _controllerNodes;
+    private readonly IReadOnlyList<ControllerNodeGene> _readOnlyControllerNodes;
 
-    public Genome(IEnumerable<RegionGene> regions, double mutationRate)
+    public Genome(
+        IEnumerable<RegionGene> regions,
+        double mutationRate,
+        MetabolicGene? metabolism = null,
+        IEnumerable<ControllerNodeGene>? controllerNodes = null)
     {
         _regions = regions.ToArray();
         _readOnlyRegions = Array.AsReadOnly(_regions);
+        _controllerNodes = (controllerNodes ?? []).ToArray();
+        _readOnlyControllerNodes = Array.AsReadOnly(_controllerNodes);
         MutationRate = mutationRate;
+        Metabolism = metabolism ?? MetabolicGene.AquaticAncestor;
         GenomeValidator.Validate(this);
         Fingerprint = ComputeFingerprint();
     }
 
     public IReadOnlyList<RegionGene> Regions => _readOnlyRegions;
     public double MutationRate { get; }
+    public MetabolicGene Metabolism { get; }
+    public IReadOnlyList<ControllerNodeGene> ControllerNodes => _readOnlyControllerNodes;
     public ulong Fingerprint { get; }
 
     public static Genome CreateAncestor() => new(
@@ -83,15 +150,35 @@ public sealed class Genome
             0.55, 0.65, 0.70, 0.45, 0.40,
             0.75, 0.35, 0.60, 0.65, 0.65)
     ],
-    mutationRate: 0.18);
+    mutationRate: 0.18,
+    metabolism: MetabolicGene.AquaticAncestor,
+    controllerNodes:
+    [
+        new ControllerNodeGene(
+            -0.10, 0.75, -0.15, -0.35, 0.40, 0.20, 0.55, -0.25,
+            0.52, 2, 0.35, 0.90, 0.30, 0.05, -0.45, 0.18),
+        new ControllerNodeGene(
+            0.08, -0.25, 0.30, 0.40, -0.10, 0.45, 0.20, 0.50,
+            -0.42, 0, 0.65, -0.35, 0.75, 0.22, 0.58, -0.28),
+        new ControllerNodeGene(
+            -0.02, 0.15, -0.20, 0.65, 0.15, -0.15, -0.45, 0.35,
+            0.30, 1, -0.72, 0.40, -0.12, 0.62, 0.35, 0.55)
+    ]);
 
     internal bool ContentEquals(Genome other) =>
-        MutationRate.Equals(other.MutationRate) && _regions.SequenceEqual(other._regions);
+        MutationRate.Equals(other.MutationRate) &&
+        Metabolism.Equals(other.Metabolism) &&
+        _regions.SequenceEqual(other._regions) &&
+        _controllerNodes.SequenceEqual(other._controllerNodes);
 
     private ulong ComputeFingerprint()
     {
         ulong hash = FingerprintHash.Offset;
         FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(MutationRate)));
+        FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Metabolism.OxygenUseFraction)));
+        FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Metabolism.OxygenCatalysis)));
+        FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Metabolism.WaterRetention)));
+        FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Metabolism.OsmoticTolerance)));
         foreach (RegionGene region in _regions)
         {
             FingerprintHash.Add(ref hash, unchecked((ulong)region.RegionId));
@@ -115,6 +202,22 @@ public sealed class Genome
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.Pigment)));
         }
 
+        FingerprintHash.Add(ref hash, unchecked((ulong)_controllerNodes.Length));
+        foreach (ControllerNodeGene node in _controllerNodes)
+        {
+            FingerprintHash.Add(ref hash, unchecked((ulong)node.RecurrentSourceIndex));
+            double[] values =
+            [
+                node.Bias, node.LightWeight, node.TemperatureWeight, node.PressureWeight,
+                node.EnergyWeight, node.MatterWeight, node.HydrationWeight, node.ContactWeight,
+                node.SelfMemoryWeight, node.RecurrentWeight, node.ContractionOutputWeight,
+                node.PermeabilityOutputWeight, node.SecretionOutputWeight,
+                node.VerticalContractionOutputWeight, node.LateralContractionOutputWeight
+            ];
+            foreach (double value in values)
+                FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(value)));
+        }
+
         return hash;
     }
 }
@@ -122,6 +225,7 @@ public sealed class Genome
 public static class GenomeValidator
 {
     public const int MaximumRegions = 32;
+    public const int MaximumControllerNodes = 12;
 
     public static void Validate(Genome genome)
     {
@@ -130,6 +234,37 @@ public static class GenomeValidator
             throw new InvalidOperationException($"A genome must contain 1-{MaximumRegions} regions.");
         if (!double.IsFinite(genome.MutationRate) || genome.MutationRate is < 0.0 or > 0.5)
             throw new InvalidOperationException("Mutation rate must be finite and within 0-0.5.");
+        if (!genome.Metabolism.AllFinite ||
+            genome.Metabolism.OxygenUseFraction is < 0.0 or > 1.0 ||
+            genome.Metabolism.OxygenCatalysis is < 0.0 or > 1.0 ||
+            genome.Metabolism.WaterRetention is < 0.0 or > 1.0 ||
+            genome.Metabolism.OsmoticTolerance is < 0.0 or > 1.0)
+        {
+            throw new InvalidOperationException("Metabolic trade-off genes must be finite within 0-1.");
+        }
+        if (genome.ControllerNodes.Count > MaximumControllerNodes)
+            throw new InvalidOperationException($"A controller may contain 0-{MaximumControllerNodes} nodes.");
+        for (int index = 0; index < genome.ControllerNodes.Count; index++)
+        {
+            ControllerNodeGene node = genome.ControllerNodes[index];
+            if (!node.AllFinite ||
+                node.RecurrentSourceIndex < -1 ||
+                node.RecurrentSourceIndex >= genome.ControllerNodes.Count ||
+                node.RecurrentSourceIndex == index)
+            {
+                throw new InvalidOperationException($"Controller node {index} has an invalid value or connection.");
+            }
+            double[] weights =
+            [
+                node.Bias, node.LightWeight, node.TemperatureWeight, node.PressureWeight,
+                node.EnergyWeight, node.MatterWeight, node.HydrationWeight, node.ContactWeight,
+                node.SelfMemoryWeight, node.RecurrentWeight, node.ContractionOutputWeight,
+                node.PermeabilityOutputWeight, node.SecretionOutputWeight,
+                node.VerticalContractionOutputWeight, node.LateralContractionOutputWeight
+            ];
+            if (weights.Any(value => value is < -3.0 or > 3.0))
+                throw new InvalidOperationException($"Controller node {index} has a weight outside -3 to 3.");
+        }
 
         HashSet<int> ids = [];
         foreach (RegionGene region in regions)
@@ -247,20 +382,52 @@ public readonly record struct MutationResult(Genome Genome, MutationKind Kind, s
 
 public sealed class GenomeMutator
 {
-    public MutationResult Inherit(Genome parent, DeterministicRandom random)
+    public MutationResult Inherit(
+        Genome parent,
+        DeterministicRandom bodyRandom,
+        DeterministicRandom controllerRandom)
     {
-        if (random.NextUnitDouble() >= parent.MutationRate)
+        bool mutateBody = bodyRandom.NextUnitDouble() < parent.MutationRate;
+        bool mutateController = controllerRandom.NextUnitDouble() < parent.MutationRate * 0.55;
+        if (!mutateBody && !mutateController)
             return new MutationResult(parent, MutationKind.None, "exact inheritance");
 
-        double choice = random.NextUnitDouble();
-        MutationKind kind = choice switch
+        Genome result = parent;
+        MutationKind kind = MutationKind.None;
+        List<string> summaries = [];
+        if (mutateBody)
         {
-            < 0.70 => MutationKind.Point,
-            < 0.80 => MutationKind.DuplicateRegion,
-            < 0.90 => MutationKind.DeleteRegion,
-            _ => MutationKind.ReconnectRegion
-        };
-        return MutateForced(parent, random, kind);
+            double choice = bodyRandom.NextUnitDouble();
+            kind = choice switch
+            {
+                < 0.58 => MutationKind.Point,
+                < 0.68 => MutationKind.MetabolicPoint,
+                < 0.79 => MutationKind.DuplicateRegion,
+                < 0.90 => MutationKind.DeleteRegion,
+                _ => MutationKind.ReconnectRegion
+            };
+            MutationResult bodyResult = MutateForced(result, bodyRandom, kind);
+            result = bodyResult.Genome;
+            summaries.Add(bodyResult.Summary);
+        }
+
+        if (mutateController)
+        {
+            double choice = controllerRandom.NextUnitDouble();
+            MutationKind controllerKind = choice switch
+            {
+                < 0.70 => MutationKind.ControllerPoint,
+                < 0.82 => MutationKind.ControllerAddNode,
+                < 0.92 => MutationKind.ControllerDeleteNode,
+                _ => MutationKind.ControllerReconnect
+            };
+            MutationResult controllerResult = MutateControllerForced(result, controllerRandom, controllerKind);
+            result = controllerResult.Genome;
+            kind = controllerKind;
+            summaries.Add(controllerResult.Summary);
+        }
+
+        return new MutationResult(result, kind, string.Join("; ", summaries));
     }
 
     public MutationResult MutateForced(Genome parent, DeterministicRandom random, MutationKind kind)
@@ -269,6 +436,7 @@ public sealed class GenomeMutator
             return new MutationResult(parent, MutationKind.None, "exact inheritance");
 
         List<RegionGene> regions = parent.Regions.ToList();
+        MetabolicGene metabolism = parent.Metabolism;
         string summary;
         switch (kind)
         {
@@ -284,6 +452,9 @@ public sealed class GenomeMutator
             case MutationKind.ReconnectRegion when regions.Count > 2:
                 summary = ReconnectRegion(regions, random);
                 break;
+            case MutationKind.MetabolicPoint:
+                (metabolism, summary) = MutateMetabolism(metabolism, random);
+                break;
             default:
                 kind = MutationKind.Point;
                 summary = PointMutation(regions, random) + " (structural mutation unavailable)";
@@ -291,7 +462,40 @@ public sealed class GenomeMutator
         }
 
         double mutationRate = parent.MutationRate;
-        Genome child = new(regions, mutationRate);
+        Genome child = new(regions, mutationRate, metabolism, parent.ControllerNodes);
+        return new MutationResult(child, kind, summary);
+    }
+
+    public MutationResult MutateControllerForced(
+        Genome parent,
+        DeterministicRandom random,
+        MutationKind kind)
+    {
+        List<ControllerNodeGene> nodes = parent.ControllerNodes.ToList();
+        string summary;
+        switch (kind)
+        {
+            case MutationKind.ControllerPoint when nodes.Count > 0:
+                summary = MutateControllerPoint(nodes, random);
+                break;
+            case MutationKind.ControllerAddNode when nodes.Count < GenomeValidator.MaximumControllerNodes:
+                summary = AddControllerNode(nodes, random);
+                break;
+            case MutationKind.ControllerDeleteNode when nodes.Count > 0:
+                summary = DeleteControllerNode(nodes, random);
+                break;
+            case MutationKind.ControllerReconnect when nodes.Count > 1:
+                summary = ReconnectControllerNode(nodes, random);
+                break;
+            default:
+                kind = nodes.Count == 0 ? MutationKind.ControllerAddNode : MutationKind.ControllerPoint;
+                summary = nodes.Count == 0
+                    ? AddControllerNode(nodes, random)
+                    : MutateControllerPoint(nodes, random) + " (requested controller change unavailable)";
+                break;
+        }
+
+        Genome child = new(parent.Regions, parent.MutationRate, parent.Metabolism, nodes);
         return new MutationResult(child, kind, summary);
     }
 
@@ -412,6 +616,100 @@ public sealed class GenomeMutator
         }
         while (changed);
         return descendants;
+    }
+
+    private static (MetabolicGene Gene, string Summary) MutateMetabolism(
+        MetabolicGene gene,
+        DeterministicRandom random)
+    {
+        int property = random.NextInt(4);
+        double delta = (random.NextUnitDouble() - 0.5) * 0.16;
+        MetabolicGene changed = property switch
+        {
+            0 => gene with { OxygenUseFraction = ClampUnit(gene.OxygenUseFraction + delta) },
+            1 => gene with { OxygenCatalysis = ClampUnit(gene.OxygenCatalysis + delta) },
+            2 => gene with { WaterRetention = ClampUnit(gene.WaterRetention + delta) },
+            _ => gene with { OsmoticTolerance = ClampUnit(gene.OsmoticTolerance + delta) }
+        };
+        return (changed, $"metabolic trade-off {property} changed by {delta:+0.000;-0.000}");
+    }
+
+    private static string MutateControllerPoint(
+        List<ControllerNodeGene> nodes,
+        DeterministicRandom random)
+    {
+        int index = random.NextInt(nodes.Count);
+        ControllerNodeGene node = nodes[index];
+        int property = random.NextInt(15);
+        double delta = (random.NextUnitDouble() - 0.5) * 0.30;
+        double Adjust(double value) => Math.Clamp(value + delta, -3.0, 3.0);
+        nodes[index] = property switch
+        {
+            0 => node with { Bias = Adjust(node.Bias) },
+            1 => node with { LightWeight = Adjust(node.LightWeight) },
+            2 => node with { TemperatureWeight = Adjust(node.TemperatureWeight) },
+            3 => node with { PressureWeight = Adjust(node.PressureWeight) },
+            4 => node with { EnergyWeight = Adjust(node.EnergyWeight) },
+            5 => node with { MatterWeight = Adjust(node.MatterWeight) },
+            6 => node with { HydrationWeight = Adjust(node.HydrationWeight) },
+            7 => node with { ContactWeight = Adjust(node.ContactWeight) },
+            8 => node with { SelfMemoryWeight = Adjust(node.SelfMemoryWeight) },
+            9 => node with { RecurrentWeight = Adjust(node.RecurrentWeight) },
+            10 => node with { ContractionOutputWeight = Adjust(node.ContractionOutputWeight) },
+            11 => node with { PermeabilityOutputWeight = Adjust(node.PermeabilityOutputWeight) },
+            12 => node with { SecretionOutputWeight = Adjust(node.SecretionOutputWeight) },
+            13 => node with { VerticalContractionOutputWeight = Adjust(node.VerticalContractionOutputWeight) },
+            _ => node with { LateralContractionOutputWeight = Adjust(node.LateralContractionOutputWeight) }
+        };
+        return $"controller node {index} weight {property} changed by {delta:+0.000;-0.000}";
+    }
+
+    private static string AddControllerNode(
+        List<ControllerNodeGene> nodes,
+        DeterministicRandom random)
+    {
+        double Weight(double scale = 1.0) => (random.NextUnitDouble() - 0.5) * 2.0 * scale;
+        int source = nodes.Count == 0 ? -1 : random.NextInt(nodes.Count);
+        ControllerNodeGene node = new(
+            Weight(0.35), Weight(), Weight(), Weight(), Weight(), Weight(), Weight(), Weight(),
+            Weight(0.65), source, Weight(0.8), Weight(), Weight(), Weight(0.6), Weight(), Weight());
+        nodes.Add(node);
+        return $"controller node {nodes.Count - 1} added with recurrent source {source}";
+    }
+
+    private static string DeleteControllerNode(
+        List<ControllerNodeGene> nodes,
+        DeterministicRandom random)
+    {
+        int removed = random.NextInt(nodes.Count);
+        nodes.RemoveAt(removed);
+        for (int index = 0; index < nodes.Count; index++)
+        {
+            ControllerNodeGene node = nodes[index];
+            int source = node.RecurrentSourceIndex;
+            if (source == removed)
+                source = -1;
+            else if (source > removed)
+                source--;
+            if (source == index)
+                source = -1;
+            nodes[index] = node with { RecurrentSourceIndex = source };
+        }
+        return $"controller node {removed} deleted and connections repaired";
+    }
+
+    private static string ReconnectControllerNode(
+        List<ControllerNodeGene> nodes,
+        DeterministicRandom random)
+    {
+        int index = random.NextInt(nodes.Count);
+        int[] candidates = Enumerable.Range(-1, nodes.Count + 1)
+            .Where(candidate => candidate != index && candidate != nodes[index].RecurrentSourceIndex)
+            .ToArray();
+        int source = candidates[random.NextInt(candidates.Length)];
+        int oldSource = nodes[index].RecurrentSourceIndex;
+        nodes[index] = nodes[index] with { RecurrentSourceIndex = source };
+        return $"controller node {index} recurrent source {oldSource}->{source}";
     }
 
     private static double ClampUnit(double value) => Math.Clamp(value, 0.0, 1.0);

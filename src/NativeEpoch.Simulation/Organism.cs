@@ -9,11 +9,27 @@ public struct Organism
     public int GenomeId;
     public Vector2 Position;
     public Vector2 Velocity;
+    public float Depth;
+    public float VerticalVelocity;
     public double HeadingRadians;
+    public double Hydration;
+    public double Immersion;
+    public double WaterExposedArea;
+    public double AirExposedArea;
+    public int ExposedSurfaceSamples;
+    public int OccludedSurfaceSamples;
+    public double OxygenUptakeLastStep;
+    public double OxygenConsumedLastStep;
+    public double MetabolicEnergyLastStep;
+    public double DehydrationCostLastStep;
+    public double ContactPressure;
+    public double[] ControllerState;
+    public ControllerInputs ControllerInputs;
+    public ControllerOutputs ControllerOutputs;
+    public Vector2 LocalActuationForce;
+    public double ActuationTorque;
     public double AgeSeconds;
     public double Maturity;
-    public double Energy;
-    public double StoredMatter;
     public double ReproductionCooldownSeconds;
     public DevelopingBody Body;
 
@@ -22,11 +38,26 @@ public struct Organism
         float.IsFinite(Position.Y) &&
         float.IsFinite(Velocity.X) &&
         float.IsFinite(Velocity.Y) &&
+        float.IsFinite(Depth) && Depth >= 0f &&
+        float.IsFinite(VerticalVelocity) &&
         double.IsFinite(HeadingRadians) &&
+        double.IsFinite(Hydration) && Hydration is >= 0.0 and <= 1.0 &&
+        double.IsFinite(Immersion) && Immersion is >= 0.0 and <= 1.0 &&
+        double.IsFinite(WaterExposedArea) && WaterExposedArea >= 0.0 &&
+        double.IsFinite(AirExposedArea) && AirExposedArea >= 0.0 &&
+        ExposedSurfaceSamples >= 0 && OccludedSurfaceSamples >= 0 &&
+        double.IsFinite(OxygenUptakeLastStep) && OxygenUptakeLastStep >= 0.0 &&
+        double.IsFinite(OxygenConsumedLastStep) && OxygenConsumedLastStep >= 0.0 &&
+        double.IsFinite(MetabolicEnergyLastStep) && MetabolicEnergyLastStep >= 0.0 &&
+        double.IsFinite(DehydrationCostLastStep) && DehydrationCostLastStep >= 0.0 &&
+        double.IsFinite(ContactPressure) && ContactPressure >= 0.0 &&
+        ControllerState is not null && ControllerState.All(double.IsFinite) &&
+        ControllerInputs.AllFinite &&
+        ControllerOutputs.AllFinite &&
+        float.IsFinite(LocalActuationForce.X) && float.IsFinite(LocalActuationForce.Y) &&
+        double.IsFinite(ActuationTorque) &&
         double.IsFinite(AgeSeconds) &&
         double.IsFinite(Maturity) &&
-        double.IsFinite(Energy) &&
-        double.IsFinite(StoredMatter) &&
         double.IsFinite(ReproductionCooldownSeconds) &&
         Maturity is >= 0.0 and <= 1.0 &&
         Body is not null;

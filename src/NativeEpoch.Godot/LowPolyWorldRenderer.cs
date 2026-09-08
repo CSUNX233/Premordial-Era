@@ -10,7 +10,9 @@ public enum HeatmapMode
     Temperature,
     Light,
     Minerals,
-    Detritus
+    Detritus,
+    DissolvedOxygen,
+    AirOxygen
 }
 
 public sealed partial class LowPolyWorldRenderer : Node3D
@@ -117,7 +119,7 @@ public sealed partial class LowPolyWorldRenderer : Node3D
 
         StandardMaterial3D waterMaterial = new()
         {
-            AlbedoColor = new Color(0.08f, 0.38f, 0.55f, 0.43f),
+            AlbedoColor = new Color(0.055f, 0.31f, 0.49f, 0.37f),
             Roughness = 0.18f,
             Metallic = 0.05f,
             Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
@@ -147,7 +149,7 @@ public sealed partial class LowPolyWorldRenderer : Node3D
 
         foreach (OrganismPresentationState organism in snapshot.Organisms)
         {
-            float terrainHeight = (float)organism.Environment.TerrainHeight;
+            float centerHeight = OrganismElevation(organism);
             double headingCosine = Math.Cos(organism.HeadingRadians);
             double headingSine = Math.Sin(organism.HeadingRadians);
             bool showDetailed = !UsesSimplifiedProxies || organism.Id == selectedId;
@@ -158,7 +160,7 @@ public sealed partial class LowPolyWorldRenderer : Node3D
                 float height = Math.Max(0.20f, diameter * 0.28f);
                 Vector3 proxyOrigin = new(
                     organism.Position.X - (_worldSize * 0.5f),
-                    terrainHeight + (height * 0.5f) + 0.12f,
+                    organism.Immersion > 0.05 ? centerHeight : centerHeight + (height * 0.5f),
                     organism.Position.Y - (_worldSize * 0.5f));
                 Basis proxyBasis = Basis.Identity.Scaled(new Vector3(diameter, height, diameter));
                 multimesh.SetInstanceTransform(instance, new Transform3D(proxyBasis, proxyOrigin));
@@ -177,7 +179,7 @@ public sealed partial class LowPolyWorldRenderer : Node3D
                     (region.LocalCenter.Y * headingCosine)) * OrganismVisualScale;
                 Vector3 origin = new(
                     organism.Position.X - (_worldSize * 0.5f) + localX,
-                    terrainHeight + (thickness * 0.5f) + 0.12f,
+                    organism.Immersion > 0.05 ? centerHeight : centerHeight + (thickness * 0.5f),
                     organism.Position.Y - (_worldSize * 0.5f) + localZ);
                 Basis basis = new Basis(
                     Vector3.Up,
@@ -231,7 +233,7 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         float diameter = Math.Max(2.0f, (float)organism.Body.BoundingRadius * OrganismVisualScale * 2.6f);
         _selection.Position = new Vector3(
             organism.Position.X - (_worldSize * 0.5f),
-            (float)organism.Environment.TerrainHeight + 0.06f,
+            OrganismElevation(organism),
             organism.Position.Y - (_worldSize * 0.5f));
         _selection.Scale = new Vector3(diameter, 0.08f, diameter);
         _selection.Visible = true;
@@ -274,11 +276,13 @@ public sealed partial class LowPolyWorldRenderer : Node3D
     {
         float value = mode switch
         {
-            HeatmapMode.Height => Normalize(sample.TerrainHeight, -18.0, 8.0),
+            HeatmapMode.Height => Normalize(sample.TerrainHeight, -105.0, 8.0),
             HeatmapMode.Temperature => Normalize(sample.Temperature, 0.35, 1.05),
             HeatmapMode.Light => Normalize(sample.Light, 0.45, 1.0),
-            HeatmapMode.Minerals => Normalize(sample.Minerals, 3.5, 10.0),
+            HeatmapMode.Minerals => Normalize(sample.Minerals, 0.0, 0.35),
             HeatmapMode.Detritus => Normalize(sample.Detritus, 0.0, 2.0),
+            HeatmapMode.DissolvedOxygen => Normalize(sample.DissolvedOxygenAvailability, 0.0, 0.4),
+            HeatmapMode.AirOxygen => Normalize(sample.AirOxygenAvailability, 0.0, 0.4),
             _ => 0f
         };
 
@@ -286,8 +290,9 @@ public sealed partial class LowPolyWorldRenderer : Node3D
             return HeatColor(value);
         if (sample.TerrainHeight < 0.0)
         {
-            float depth = Normalize(-sample.TerrainHeight, 0.0, 18.0);
-            return new Color(0.09f, 0.23f + (0.12f * (1f - depth)), 0.31f + (0.16f * (1f - depth)));
+            float depth = Normalize(-sample.TerrainHeight, 0.0, 100.0);
+            return new Color(0.045f + (0.05f * (1f - depth)),
+                0.11f + (0.22f * (1f - depth)), 0.18f + (0.29f * (1f - depth)));
         }
 
         float height = Normalize(sample.TerrainHeight, 0.0, 8.0);
@@ -305,6 +310,11 @@ public sealed partial class LowPolyWorldRenderer : Node3D
 
     private static float Normalize(double value, double minimum, double maximum) =>
         (float)Math.Clamp((value - minimum) / (maximum - minimum), 0.0, 1.0);
+
+    public static float OrganismElevation(OrganismPresentationState organism) =>
+        organism.Environment.WaterDepth > 0.0 && organism.Immersion > 0.05
+            ? (float)(organism.Environment.WaterSurface - organism.Depth)
+            : (float)organism.Environment.TerrainHeight + 0.12f;
 
     private void EnsureTerrainChunks()
     {

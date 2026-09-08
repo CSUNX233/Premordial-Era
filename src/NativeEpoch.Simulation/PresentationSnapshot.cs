@@ -11,7 +11,26 @@ public readonly record struct OrganismPresentationState(
     int GenomeRegionCount,
     Vector2 Position,
     Vector2 Velocity,
+    float Depth,
+    float VerticalVelocity,
+    double Immersion,
     double HeadingRadians,
+    double Hydration,
+    double InternalOxygen,
+    double OxygenCapacity,
+    double OxygenUptakeLastStep,
+    double OxygenConsumedLastStep,
+    double MetabolicEnergyLastStep,
+    double DehydrationCostLastStep,
+    double ContactPressure,
+    double WaterExposedArea,
+    double AirExposedArea,
+    int ExposedSurfaceSamples,
+    int OccludedSurfaceSamples,
+    ControllerInputs ControllerInputs,
+    ControllerOutputs ControllerOutputs,
+    Vector2 LocalActuationForce,
+    double ActuationTorque,
     double AgeSeconds,
     double Maturity,
     double Energy,
@@ -20,7 +39,8 @@ public readonly record struct OrganismPresentationState(
     double DevelopmentCompletion,
     EnvironmentSample Environment,
     BodyCache Body,
-    IReadOnlyList<BodyVisualRegion> Regions);
+    IReadOnlyList<BodyVisualRegion> Regions,
+    IReadOnlyList<BodyRegion> RegionInventories);
 
 public sealed class WorldPresentationSnapshot
 {
