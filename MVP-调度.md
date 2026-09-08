@@ -45,8 +45,9 @@ Godot .NET 工程、分块地形、水面、MultiMesh、检查器、热力图、
 
 ## Git 与未测限制
 
-`main` → `https://github.com/CSUNX233/-.git`。用户本轮授权提交并推送当前阶段3及修复基线；后续阶段2由 agent 编辑工作树，不自行提交推送。
+`main` → `https://github.com/CSUNX233/Premordial-Era.git`。当前阶段3及修复基线已提交并推送：72c3f7e；后续阶段2由 agent 编辑工作树，不自行提交推送。
 
 保留用户的未跟踪空场景 `node_3d.tscn`，不混入开发交付。Godot 脚本 UID 随对应源文件提交；缓存、bin/obj 与编辑器安装不提交。
 
 仍未验收 RTX 3060 标准性能、长期生态稳定、完整物种树及存档。简化基础自推进不等于真实微生物流体求解，形态多样不等于已经证明适应性进化。
+
