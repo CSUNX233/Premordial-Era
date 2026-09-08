@@ -9,6 +9,15 @@ public readonly record struct BodyRegion(int RegionId, double Matter, double Dev
         double.IsFinite(Development) && Development is >= 0.0 and <= 1.0;
 }
 
+public readonly record struct BodyVisualRegion(
+    int RegionId,
+    Vector2 LocalCenter,
+    double Angle,
+    double Length,
+    double Width,
+    double Thickness,
+    Vector3 Color);
+
 public readonly record struct BodyCache(
     double TotalMatter,
     double PhysicalMass,
@@ -25,6 +34,7 @@ public readonly record struct BodyCache(
     double StorageCapacity,
     double MaintenanceEnergyPerSecond,
     double MaximumActivationEnergyPerSecond,
+    Vector2 PropulsionVector,
     double BoundingRadius,
     double MatterConnectivity,
     double SignalConnectivity)
@@ -46,6 +56,8 @@ public readonly record struct BodyCache(
         double.IsFinite(StorageCapacity) &&
         double.IsFinite(MaintenanceEnergyPerSecond) &&
         double.IsFinite(MaximumActivationEnergyPerSecond) &&
+        float.IsFinite(PropulsionVector.X) &&
+        float.IsFinite(PropulsionVector.Y) &&
         double.IsFinite(BoundingRadius) &&
         double.IsFinite(MatterConnectivity) &&
         double.IsFinite(SignalConnectivity);
@@ -192,7 +204,7 @@ public static class BodyCalculator
                 : parentCenter + (direction * (float)(length * 0.5));
             centers[gene.RegionId] = center;
             angles[gene.RegionId] = angle;
-            samples.Add(new ShapeSample(gene, body, center, length, width));
+            samples.Add(new ShapeSample(gene, body, center, angle, length, width));
         }
 
         double totalMatter = bodyRegions.Sum(region => region.Matter);
@@ -219,6 +231,7 @@ public static class BodyCalculator
         double storage = 0.0;
         double maintenance = 0.0;
         double activation = 0.0;
+        Vector2 propulsion = Vector2.Zero;
         double radius = 0.0;
         int matterLinks = 0;
         int signalLinks = 0;
@@ -255,12 +268,19 @@ public static class BodyCalculator
             activation += sample.Body.Matter *
                 ((0.55 * gene.Contractility) + (0.20 * gene.SignalConductivity) +
                  (0.18 * gene.CatalyticActivity)) * signalPath;
+            Vector2 materialDirection = new(
+                (float)Math.Cos(sample.Angle),
+                (float)Math.Sin(sample.Angle));
+            propulsion += materialDirection * (float)(
+                sample.Body.Matter * gene.Contractility *
+                (0.35 + (0.65 * gene.Rigidity)) * signalPath);
             radius = Math.Max(radius,
                 Vector2.Distance(sample.Center, centerOfMass) +
                 (0.5 * Math.Sqrt((sample.Length * sample.Length) + (sample.Width * sample.Width))));
         }
 
         int count = Math.Max(1, samples.Count);
+        double propulsionDivisor = Math.Max(0.25, physicalMass + (drag * 0.08));
         return new BodyCache(
             totalMatter,
             physicalMass,
@@ -277,9 +297,68 @@ public static class BodyCalculator
             storage,
             maintenance,
             activation,
+            propulsion / (float)propulsionDivisor,
             radius,
             matterLinks / (double)count,
             signalLinks / (double)count);
+    }
+
+    public static IReadOnlyList<BodyVisualRegion> BuildVisualRegions(
+        Genome genome,
+        IReadOnlyList<BodyRegion> bodyRegions)
+    {
+        Dictionary<int, RegionGene> genes = genome.Regions.ToDictionary(gene => gene.RegionId);
+        Dictionary<int, Vector2> centers = [];
+        Dictionary<int, double> angles = [];
+        List<BodyVisualRegion> result = new(bodyRegions.Count);
+        List<BodyRegion> pending = bodyRegions.ToList();
+
+        while (pending.Count > 0)
+        {
+            int pendingIndex = pending.FindIndex(body =>
+            {
+                RegionGene candidate = genes[body.RegionId];
+                return candidate.IsCore || centers.ContainsKey(candidate.ParentRegionId);
+            });
+            if (pendingIndex < 0)
+                throw new InvalidOperationException("Developed geometry is not rooted at the core.");
+
+            BodyRegion body = pending[pendingIndex];
+            pending.RemoveAt(pendingIndex);
+            RegionGene gene = genes[body.RegionId];
+            double scale = Math.Sqrt(Math.Clamp(body.Matter / TargetMatter(gene), 0.0, 1.0));
+            double length = gene.TargetLength * scale;
+            double width = gene.TargetWidth * scale;
+            double angle = gene.RelativeAngle;
+            Vector2 parentCenter = Vector2.Zero;
+            if (!gene.IsCore)
+            {
+                parentCenter = centers[gene.ParentRegionId];
+                angle += angles[gene.ParentRegionId];
+            }
+
+            Vector2 direction = new((float)Math.Cos(angle), (float)Math.Sin(angle));
+            Vector2 center = gene.IsCore
+                ? Vector2.Zero
+                : parentCenter + (direction * (float)(length * 0.5));
+            centers[gene.RegionId] = center;
+            angles[gene.RegionId] = angle;
+
+            Vector3 color = new(
+                (float)(0.18 + (0.68 * gene.Pigment)),
+                (float)(0.20 + (0.65 * gene.LightReactivity)),
+                (float)(0.22 + (0.58 * gene.Permeability)));
+            result.Add(new BodyVisualRegion(
+                gene.RegionId,
+                center,
+                angle,
+                length,
+                width,
+                Math.Max(0.08, width * (0.30 + (0.45 * gene.Density))),
+                color));
+        }
+
+        return result.AsReadOnly();
     }
 
     public static double MaximumDifference(BodyCache left, BodyCache right)
@@ -301,6 +380,7 @@ public static class BodyCalculator
             Math.Abs(left.StorageCapacity - right.StorageCapacity),
             Math.Abs(left.MaintenanceEnergyPerSecond - right.MaintenanceEnergyPerSecond),
             Math.Abs(left.MaximumActivationEnergyPerSecond - right.MaximumActivationEnergyPerSecond),
+            Vector2.Distance(left.PropulsionVector, right.PropulsionVector),
             Math.Abs(left.BoundingRadius - right.BoundingRadius),
             Math.Abs(left.MatterConnectivity - right.MatterConnectivity),
             Math.Abs(left.SignalConnectivity - right.SignalConnectivity)
@@ -312,6 +392,7 @@ public static class BodyCalculator
         RegionGene Gene,
         BodyRegion Body,
         Vector2 Center,
+        double Angle,
         double Length,
         double Width);
 }

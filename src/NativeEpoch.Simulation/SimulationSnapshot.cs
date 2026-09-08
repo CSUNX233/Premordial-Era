@@ -15,13 +15,21 @@ public readonly record struct SimulationSnapshot(
     double OrganismStoredMatter,
     double TotalMatter,
     double InitialMatter,
+    double CumulativeExternalMatter,
     double MatterError,
     double LivingEnergy,
     double CumulativeLightEnergy,
     double CumulativeDissipatedEnergy,
+    double AverageSpeed,
+    double CumulativeMovementEnergy,
     double MaximumCacheError,
     bool AllFinite,
     ulong StateFingerprint);
+
+public readonly record struct EnvironmentInterventionRecord(
+    long StepIndex,
+    EnvironmentBrushCommand Command,
+    double AppliedMatterDelta);
 
 public readonly record struct BirthRecord(
     ulong ParentId,

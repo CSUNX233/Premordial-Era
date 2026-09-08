@@ -18,6 +18,12 @@ public sealed record SimulationConfig
     public double BaseMaintenanceEnergyPerSecond { get; init; } = 0.12;
     public double GrowthMatterPerSecond { get; init; } = 0.18;
     public double GrowthEnergyPerMatter { get; init; } = 1.5;
+    public double PropulsionAccelerationScale { get; init; } = 1.6;
+    public double MaximumMovementSpeed { get; init; } = 2.4;
+    public double VelocityDampingPerSecond { get; init; } = 0.85;
+    public double MovementEnergyPerDistance { get; init; } = 0.16;
+    public float SeparationRadius { get; init; } = 2.8f;
+    public double SeparationAcceleration { get; init; } = 4.0;
     public double ReproductionEnergyCost { get; init; } = 12.0;
     public double ReproductionEnergyThreshold { get; init; } = 16.0;
     public double MaturityAgeSeconds { get; init; } = 6.0;
@@ -45,6 +51,8 @@ public sealed record SimulationConfig
             CoreInitialMatter, AncestorStoredMatter, AncestorEnergy, NewbornEnergy, MaximumEnergy,
             BaseStoredMatter, MatterUptakePerSurfacePerSecond, LightEnergyPerSurfacePerSecond,
             BaseMaintenanceEnergyPerSecond, GrowthMatterPerSecond, GrowthEnergyPerMatter,
+            PropulsionAccelerationScale, MaximumMovementSpeed, VelocityDampingPerSecond,
+            MovementEnergyPerDistance, SeparationRadius, SeparationAcceleration,
             ReproductionEnergyCost, ReproductionEnergyThreshold, MaturityAgeSeconds,
             ReproductionCooldownSeconds, MaximumAgeSeconds, NewbornOffsetRadius
         ];

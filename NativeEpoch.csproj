@@ -1,0 +1,12 @@
+<Project Sdk="Godot.NET.Sdk/4.7.2">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RootNamespace>NativeEpoch.Godot</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="src\NativeEpoch.Godot\**\*.cs" />
+    <ProjectReference Include="src\NativeEpoch.Simulation\NativeEpoch.Simulation.csproj" />
+  </ItemGroup>
+</Project>

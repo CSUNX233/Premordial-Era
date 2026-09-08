@@ -25,6 +25,32 @@ public interface IMutableEnvironmentField : IEnvironmentField
     double TotalMinerals { get; }
     double TotalDetritus { get; }
     bool AllFinite { get; }
+    double ApplyBrush(EnvironmentBrushCommand command);
+}
+
+public enum EnvironmentBrushChannel
+{
+    Minerals,
+    Temperature
+}
+
+public readonly record struct EnvironmentBrushCommand(
+    Vector2 Position,
+    float Radius,
+    double Amount,
+    EnvironmentBrushChannel Channel)
+{
+    public void Validate(float worldSize)
+    {
+        if (!float.IsFinite(Position.X) || !float.IsFinite(Position.Y) ||
+            Position.X < 0f || Position.X > worldSize ||
+            Position.Y < 0f || Position.Y > worldSize ||
+            !float.IsFinite(Radius) || Radius <= 0f ||
+            !double.IsFinite(Amount) || Amount == 0.0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(EnvironmentBrushCommand));
+        }
+    }
 }
 
 /// <summary>
@@ -139,6 +165,50 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         Add(_detritus, quad.I10, amount * quad.W10);
         Add(_detritus, quad.I01, amount * quad.W01);
         Add(_detritus, quad.I11, amount * quad.W11);
+    }
+
+    public double ApplyBrush(EnvironmentBrushCommand command)
+    {
+        command.Validate(_worldSize);
+        double totalMatterDelta = 0.0;
+        double spacing = _worldSize / (_gridSize - 1);
+        int minimumX = Math.Max(0, (int)Math.Floor((command.Position.X - command.Radius) / spacing));
+        int maximumX = Math.Min(_gridSize - 1, (int)Math.Ceiling((command.Position.X + command.Radius) / spacing));
+        int minimumY = Math.Max(0, (int)Math.Floor((command.Position.Y - command.Radius) / spacing));
+        int maximumY = Math.Min(_gridSize - 1, (int)Math.Ceiling((command.Position.Y + command.Radius) / spacing));
+
+        for (int y = minimumY; y <= maximumY; y++)
+        {
+            double worldY = y * spacing;
+            for (int x = minimumX; x <= maximumX; x++)
+            {
+                double worldX = x * spacing;
+                double distance = Math.Sqrt(
+                    Math.Pow(worldX - command.Position.X, 2.0) +
+                    Math.Pow(worldY - command.Position.Y, 2.0));
+                if (distance >= command.Radius)
+                    continue;
+
+                double normalized = 1.0 - (distance / command.Radius);
+                double falloff = normalized * normalized * (3.0 - (2.0 * normalized));
+                int index = Index(x, y);
+                if (command.Channel == EnvironmentBrushChannel.Minerals)
+                {
+                    double before = _minerals[index];
+                    _minerals[index] = Math.Max(0.0, before + (command.Amount * falloff));
+                    totalMatterDelta += _minerals[index] - before;
+                }
+                else
+                {
+                    _temperature[index] = Math.Clamp(
+                        _temperature[index] + (command.Amount * falloff),
+                        0.0,
+                        2.0);
+                }
+            }
+        }
+
+        return totalMatterDelta;
     }
 
     private int Index(int x, int y) => (y * _gridSize) + x;

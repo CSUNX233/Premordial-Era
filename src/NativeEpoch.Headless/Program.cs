@@ -76,10 +76,11 @@ internal static class HeadlessProgram
         bool cacheConsistent = first.ValidateBodyCaches(out double cacheError);
         bool growthPaid = VerifyPaidGrowth();
         bool forcedMutationsSafe = CheckForcedMutations(options.Seed, print: false);
+        bool movementPaid = a.AverageSpeed > 0.0 && a.CumulativeMovementEnergy > 0.0;
         double tolerance = MatterTolerance(a.InitialMatter);
         bool matterConserved = Math.Abs(a.MatterError) <= tolerance;
         bool passed = deterministic && lifecycle && developedBodies && exactInheritance && naturalVariation &&
-            cacheConsistent && growthPaid && forcedMutationsSafe &&
+            cacheConsistent && growthPaid && forcedMutationsSafe && movementPaid &&
             a.AllFinite && b.AllFinite && matterConserved;
 
         Console.WriteLine(
@@ -95,6 +96,9 @@ internal static class HeadlessProgram
             $"development={developedBodies} growth_paid={growthPaid} " +
             $"cache_consistent={cacheConsistent} cache_error={cacheError:E3}");
         Console.WriteLine($"forced_mutation_topology={forcedMutationsSafe} kinds=point,copy,delete,reconnect");
+        Console.WriteLine(
+            $"movement={movementPaid} average_speed={a.AverageSpeed:F6} " +
+            $"movement_energy={a.CumulativeMovementEnergy:F6}");
         Console.WriteLine(
             $"finite={a.AllFinite && b.AllFinite} matter_error={a.MatterError:E6} tolerance={tolerance:E6}");
         Console.WriteLine(passed ? "VERIFY PASS" : "VERIFY FAIL");
@@ -232,6 +236,7 @@ internal static class HeadlessProgram
         $"genomes={snapshot.GenomeCount,4} regions={snapshot.TotalBodyRegions,6} maturity={snapshot.AverageMaturity:F3} " +
         $"minerals={snapshot.EnvironmentMinerals,12:F6} detritus={snapshot.EnvironmentDetritus,10:F6} " +
         $"body={snapshot.OrganismBodyMatter,10:F6} stored={snapshot.OrganismStoredMatter,10:F6} " +
+        $"speed={snapshot.AverageSpeed:F4} movement_energy={snapshot.CumulativeMovementEnergy:F4} " +
         $"matter_error={snapshot.MatterError:E3} fingerprint={snapshot.StateFingerprint:X16}");
 
     private static void PrintLineage(SimulationWorld world, int count)

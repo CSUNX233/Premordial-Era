@@ -8,6 +8,8 @@ public struct Organism
     public ulong ParentId;
     public int GenomeId;
     public Vector2 Position;
+    public Vector2 Velocity;
+    public double HeadingRadians;
     public double AgeSeconds;
     public double Maturity;
     public double Energy;
@@ -18,6 +20,9 @@ public struct Organism
     public readonly bool AllFinite =>
         float.IsFinite(Position.X) &&
         float.IsFinite(Position.Y) &&
+        float.IsFinite(Velocity.X) &&
+        float.IsFinite(Velocity.Y) &&
+        double.IsFinite(HeadingRadians) &&
         double.IsFinite(AgeSeconds) &&
         double.IsFinite(Maturity) &&
         double.IsFinite(Energy) &&
