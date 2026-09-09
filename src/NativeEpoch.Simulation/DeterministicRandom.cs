@@ -55,6 +55,7 @@ internal sealed class RandomStreams
         Mutation = new DeterministicRandom(worldSeed ^ 0xA54FF53A5F1D36F1UL, 4);
         ControllerMutation = new DeterministicRandom(worldSeed ^ 0x510E527FADE682D1UL, 5);
         Mortality = new DeterministicRandom(worldSeed ^ 0x1F83D9ABFB41BD6BUL, 6);
+        Founders = new DeterministicRandom(worldSeed ^ 0x5BE0CD19137E2179UL, 7);
     }
 
     public DeterministicRandom Environment { get; }
@@ -63,4 +64,5 @@ internal sealed class RandomStreams
     public DeterministicRandom Mutation { get; }
     public DeterministicRandom ControllerMutation { get; }
     public DeterministicRandom Mortality { get; }
+    public DeterministicRandom Founders { get; }
 }

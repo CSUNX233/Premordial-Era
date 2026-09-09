@@ -57,7 +57,11 @@ public readonly record struct BirthRecord(
     int ParentGeneCount,
     int ChildGeneCount,
     MutationKind MutationKind,
-    string MutationSummary);
+    string MutationSummary)
+{
+    public int MutationEventCount { get; init; }
+    public IReadOnlyList<MutationKind> MutationEventKinds { get; init; } = Array.Empty<MutationKind>();
+}
 
 public enum DeathCause
 {

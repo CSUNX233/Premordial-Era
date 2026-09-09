@@ -196,8 +196,6 @@ public sealed partial class LowPolyWorldRenderer : Node3D
             if (continuousSkinIds.Contains(organism.Id))
                 continue;
             float centerHeight = OrganismElevation(organism);
-            double headingCosine = Math.Cos(organism.HeadingRadians);
-            double headingSine = Math.Sin(organism.HeadingRadians);
             bool showDetailed = !UsesSimplifiedProxies || organism.Id == selectedId;
             if (!showDetailed)
             {
@@ -219,18 +217,15 @@ public sealed partial class LowPolyWorldRenderer : Node3D
             foreach (BodyVisualRegion region in organism.Regions)
             {
                 float thickness = (float)region.Thickness * OrganismVisualScale;
-                float localX = (float)((region.LocalCenter.X * headingCosine) -
-                    (region.LocalCenter.Y * headingSine)) * OrganismVisualScale;
-                float localZ = (float)((region.LocalCenter.X * headingSine) +
-                    (region.LocalCenter.Y * headingCosine)) * OrganismVisualScale;
+                var localPose = RegionPose(organism,region);
+                Basis headingBasis=new(Vector3.Up,-(float)organism.HeadingRadians);
+                Vector3 offset=(headingBasis*localPose.Center)*OrganismVisualScale;
                 Vector3 origin = new(
-                    organism.Position.X - (_worldSize * 0.5f) + localX,
-                    organism.Immersion > 0.05 ? centerHeight : centerHeight + (thickness * 0.5f),
-                    organism.Position.Y - (_worldSize * 0.5f) + localZ);
-                Basis basis = new Basis(
-                    Vector3.Up,
-                    -(float)(region.Angle + organism.HeadingRadians)).Scaled(new Vector3(
-                    (float)(region.Length+region.Width) * OrganismVisualScale,
+                    organism.Position.X - (_worldSize * 0.5f) + offset.X,
+                    centerHeight+offset.Y,
+                    organism.Position.Y - (_worldSize * 0.5f) + offset.Z);
+                Basis basis = (headingBasis*new Basis(localPose.Rotation))*Basis.FromScale(new Vector3(
+                    (localPose.Length+(float)region.Width) * OrganismVisualScale,
                     thickness,
                     (float)region.Width * OrganismVisualScale));
                 multimesh.SetInstanceTransform(instance, new Transform3D(basis, origin));
@@ -359,14 +354,15 @@ public sealed partial class LowPolyWorldRenderer : Node3D
                 from=new BodyVisualRegion(to.RegionId,to.LocalCenter,to.Angle,0,0,0,to.Color);
             if(!hasTo)
                 to=new BodyVisualRegion(from.RegionId,from.LocalCenter,from.Angle,0,0,0,from.Color);
-            float centerX=Mathf.Lerp(from.LocalCenter.X,to.LocalCenter.X,alpha);
-            float centerY=Mathf.Lerp(from.LocalCenter.Y,to.LocalCenter.Y,alpha);
-            double angle=from.Angle+NormalizeAngle(to.Angle-from.Angle)*alpha;
-            double length=Mathf.Lerp((float)from.Length,(float)to.Length,alpha);
+            var fromPose=RegionPose(previous,from);
+            var toPose=RegionPose(current,to);
+            Vector3 center=fromPose.Center.Lerp(toPose.Center,alpha);
+            Quaternion rotation=fromPose.Rotation.Slerp(toPose.Rotation,alpha);
+            double length=Mathf.Lerp(fromPose.Length,toPose.Length,alpha);
             double width=Mathf.Lerp((float)from.Width,(float)to.Width,alpha);
             double thickness=Mathf.Lerp((float)from.Thickness,(float)to.Thickness,alpha);
-            skeleton.SetBonePosePosition(index,new Vector3(centerX,0,centerY));
-            skeleton.SetBonePoseRotation(index,new Quaternion(Vector3.Up,-(float)angle));
+            skeleton.SetBonePosePosition(index,center);
+            skeleton.SetBonePoseRotation(index,rotation);
             skeleton.SetBonePoseScale(index,new Vector3(
                 rest.Length<1e-6?1f:(float)(length/rest.Length),
                 (float)(thickness/Math.Max(1e-8,(rest.StartRadius+rest.EndRadius)*rest.VerticalScale)),
@@ -384,14 +380,44 @@ public sealed partial class LowPolyWorldRenderer : Node3D
     private static bool TryFindRegion(IReadOnlyList<BodyVisualRegion> regions,int regionId,
         out BodyVisualRegion found)
     {
-        foreach(BodyVisualRegion region in regions)
+        for(int index=0;index<regions.Count;index++)
         {
+            BodyVisualRegion region=regions[index];
             if(region.RegionId!=regionId)continue;
             found=region;
             return true;
         }
         found=default;
         return false;
+    }
+
+    private static (Vector3 Center,Quaternion Rotation,float Length) RegionPose(
+        OrganismPresentationState organism,BodyVisualRegion region)
+    {
+        if(organism.AppendageRegions is not null)
+        {
+            for(int index=0;index<organism.AppendageRegions.Count;index++)
+            {
+                var segment=organism.AppendageRegions[index];
+                if(segment.RegionId!=region.RegionId)continue;
+                Vector3 start=new(segment.LocalStart.X,segment.LocalStart.Y,segment.LocalStart.Z);
+                Vector3 end=new(segment.LocalEnd.X,segment.LocalEnd.Y,segment.LocalEnd.Z);
+                Vector3 axis=end-start;
+                float length=axis.Length();
+                Quaternion rotation=new(Vector3.Up,-(float)region.Angle);
+                if(length>1e-6f)
+                {
+                    Vector3 x=axis/length;
+                    Vector3 up=Math.Abs(x.Dot(Vector3.Up))>0.98f?Vector3.Back:Vector3.Up;
+                    Vector3 z=x.Cross(up).Normalized();
+                    Vector3 y=z.Cross(x).Normalized();
+                    rotation=new Basis(x,y,z).GetRotationQuaternion();
+                }
+                return ((start+end)*0.5f,rotation,length);
+            }
+        }
+        return (new Vector3(region.LocalCenter.X,0,region.LocalCenter.Y),
+            new Quaternion(Vector3.Up,-(float)region.Angle),(float)region.Length);
     }
 
     private static double NormalizeAngle(double angle)
@@ -600,6 +626,7 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         (float)Math.Clamp((value - minimum) / (maximum - minimum), 0.0, 1.0);
 
     public static float OrganismElevation(OrganismPresentationState organism) =>
+        double.IsFinite(organism.BodyCenterElevation) ? (float)organism.BodyCenterElevation :
         organism.Environment.WaterDepth > 0.0 && organism.Immersion > 0.05
             ? (float)(organism.Environment.WaterSurface - organism.Depth)
             : (float)organism.Environment.TerrainHeight + 0.12f;

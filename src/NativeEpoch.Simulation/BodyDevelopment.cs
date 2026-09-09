@@ -13,7 +13,12 @@ public readonly record struct BodyRegion(
     double Damage = 0.0,
     double InternalSignal = 0.0,
     double TransportAvailability = 0.0,
-    double Activation = 0.0)
+    double Activation = 0.0,
+    double ExchangeExpression = 0.5,
+    double BarrierExpression = 0.3,
+    double ContractileExpression = 0.5,
+    double StructuralExpression = 0.5,
+    double SensoryExpression = 0.3)
 {
     public bool AllFinite =>
         RegionId >= 0 && double.IsFinite(Matter) && Matter > 0.0 &&
@@ -25,7 +30,12 @@ public readonly record struct BodyRegion(
         double.IsFinite(Damage) && Damage is >= 0.0 and <= 1.0 &&
         double.IsFinite(InternalSignal) && InternalSignal is >= -1.0 and <= 1.0 &&
         double.IsFinite(TransportAvailability) && TransportAvailability is >= 0.0 and <= 1.0 &&
-        double.IsFinite(Activation) && Activation is >= 0.0 and <= 1.0;
+        double.IsFinite(Activation) && Activation is >= 0.0 and <= 1.0 &&
+        double.IsFinite(ExchangeExpression) && ExchangeExpression is >= 0.0 and <= 1.0 &&
+        double.IsFinite(BarrierExpression) && BarrierExpression is >= 0.0 and <= 1.0 &&
+        double.IsFinite(ContractileExpression) && ContractileExpression is >= 0.0 and <= 1.0 &&
+        double.IsFinite(StructuralExpression) && StructuralExpression is >= 0.0 and <= 1.0 &&
+        double.IsFinite(SensoryExpression) && SensoryExpression is >= 0.0 and <= 1.0;
 }
 
 public readonly record struct BodyVisualRegion(
@@ -106,6 +116,11 @@ public readonly record struct BodyCache(
 public sealed class DevelopingBody
 {
     private readonly List<BodyRegion> _regions = [];
+    private readonly CorePrecisionProfile _precision;
+    private int _poseGeometryAge;
+    private bool _poseGeometryDirty = true;
+    private int _growthGeometryAge;
+    private bool _growthGeometryPending;
 
     public DevelopingBody(
         Genome genome,
@@ -113,8 +128,11 @@ public sealed class DevelopingBody
         double initialSubstrate = 0.0,
         double initialEnergy = 0.0,
         double initialOxygen = 0.0,
-        double initialWater = 1.0)
+        double initialWater = 1.0,
+        CorePrecisionProfile? precision = null)
     {
+        _precision=precision??CorePrecisionProfile.Balanced;
+        _precision.Validate();
         RegionGene core = genome.Regions.Single(region => region.IsCore);
         double target = BodyCalculator.TargetMatter(core);
         if (!double.IsFinite(coreMatter) || coreMatter <= 0.0 || coreMatter > target)
@@ -122,19 +140,32 @@ public sealed class DevelopingBody
         double[] inventories = [initialSubstrate, initialEnergy, initialOxygen, initialWater];
         if (inventories.Any(value => !double.IsFinite(value) || value < 0.0))
             throw new ArgumentOutOfRangeException(nameof(initialSubstrate));
+        double development=coreMatter/target;
+        double expressionTotal=core.ExchangeExpression+core.BarrierExpression+core.ContractileExpression+
+            core.StructuralExpression+core.SensoryExpression;
+        double expressionScale=expressionTotal>2.15?2.15/expressionTotal:1.0;
         _regions.Add(new BodyRegion(
             core.RegionId,
             coreMatter,
-            coreMatter / target,
+            development,
             initialSubstrate,
             initialOxygen,
             initialWater,
-            initialEnergy));
+            initialEnergy,0,0,development,
+            core.Contractility*core.ContractileExpression*expressionScale*development,
+            core.ExchangeExpression*expressionScale*development,
+            core.BarrierExpression*expressionScale*development,
+            core.ContractileExpression*expressionScale*development,
+            core.StructuralExpression*expressionScale*development,
+            core.SensoryExpression*expressionScale*development));
         RebuildGeometry(genome);
     }
 
-    public DevelopingBody(Genome genome, IEnumerable<BodyRegion> regionalState)
+    public DevelopingBody(Genome genome, IEnumerable<BodyRegion> regionalState,
+        CorePrecisionProfile? precision = null)
     {
+        _precision=precision??CorePrecisionProfile.Balanced;
+        _precision.Validate();
         _regions.AddRange(regionalState.OrderBy(region => region.RegionId));
         if (_regions.Count == 0 || !_regions.All(region => region.AllFinite) ||
             _regions.Select(region => region.RegionId).Distinct().Count() != _regions.Count ||
@@ -180,6 +211,7 @@ public sealed class DevelopingBody
     {
         double remainingGrowth = config.GrowthMatterPerSecond * config.FixedDeltaSeconds;
         double totalGrowth = 0.0;
+        bool topologyChanged = false;
 
         foreach (RegionGene gene in genome.Regions)
         {
@@ -236,17 +268,34 @@ public sealed class DevelopingBody
                 bodyIndex >= 0 ? _regions[bodyIndex].Damage : 0.0,
                 bodyIndex >= 0 ? _regions[bodyIndex].InternalSignal : 0.0,
                 bodyIndex >= 0 ? _regions[bodyIndex].TransportAvailability : 0.0,
-                bodyIndex >= 0 ? _regions[bodyIndex].Activation : 0.0);
+                bodyIndex >= 0 ? _regions[bodyIndex].Activation : 0.0,
+                bodyIndex >= 0 ? _regions[bodyIndex].ExchangeExpression : gene.ExchangeExpression*localDevelopment,
+                bodyIndex >= 0 ? _regions[bodyIndex].BarrierExpression : gene.BarrierExpression*localDevelopment,
+                bodyIndex >= 0 ? _regions[bodyIndex].ContractileExpression : gene.ContractileExpression*localDevelopment,
+                bodyIndex >= 0 ? _regions[bodyIndex].StructuralExpression : gene.StructuralExpression*localDevelopment,
+                bodyIndex >= 0 ? _regions[bodyIndex].SensoryExpression : gene.SensoryExpression*localDevelopment);
             if (bodyIndex >= 0)
                 _regions[bodyIndex] = updated;
             else
+            {
                 _regions.Add(updated);
+                topologyChanged = true;
+            }
         }
 
         if (totalGrowth > 0.0)
         {
-            RebuildGeometry(genome);
+            // Inventories and the physical cache remain exact every step. Balanced mode
+            // lets only the derived surface quadrature/visual skeleton lag by one fixed
+            // step during smooth growth; a new region always rebuilds immediately.
+            Cache = BodyCalculator.Recalculate(genome, _regions);
+            _growthGeometryAge++;
+            _growthGeometryPending = true;
+            if (topologyChanged || _growthGeometryAge >= _precision.GrowthGeometryRefreshIntervalSteps)
+                RebuildGeometry(genome);
         }
+        else if (_growthGeometryPending)
+            RebuildGeometry(genome);
         return totalGrowth;
     }
 
@@ -256,15 +305,25 @@ public sealed class DevelopingBody
         IReadOnlyDictionary<int, double> localSignals,
         double deltaSeconds)
     {
-        Dictionary<int, BodyRegion> previous = _regions.ToDictionary(region => region.RegionId);
-        Dictionary<int, RegionGene> genes = genome.Regions.ToDictionary(gene => gene.RegionId);
+        Span<BodyRegion> previous = stackalloc BodyRegion[GenomeValidator.MaximumRegions];
+        for (int index = 0; index < _regions.Count; index++) previous[index] = _regions[index];
         for (int index = 0; index < _regions.Count; index++)
         {
             BodyRegion region = _regions[index];
-            RegionGene gene = genes[region.RegionId];
-            double sourceSignal = gene.IsCore || !previous.TryGetValue(gene.SignalSourceRegionId, out BodyRegion signalSource)
-                ? 0.0
-                : signalSource.InternalSignal * gene.SignalConductivity;
+            RegionGene gene = genome.GetRegion(region.RegionId);
+            BodyRegion signalSource = default;
+            bool hasSignalSource = false;
+            if (!gene.IsCore)
+                for (int sourceIndex = 0; sourceIndex < _regions.Count; sourceIndex++)
+                    if (previous[sourceIndex].RegionId == gene.SignalSourceRegionId)
+                    {
+                        signalSource = previous[sourceIndex];
+                        hasSignalSource = true;
+                        break;
+                    }
+            double sourceSignal = hasSignalSource
+                ? signalSource.InternalSignal * gene.SignalConductivity
+                : 0.0;
             double local = localSignals.TryGetValue(region.RegionId, out double signal) ? signal : 0.0;
             double targetSignal = Math.Tanh(local + sourceSignal);
             double signalRate = 0.8 + (3.2 * gene.SignalConductivity);
@@ -274,10 +333,17 @@ public sealed class DevelopingBody
                 -1.0,
                 1.0);
 
-            double sourceTransport = gene.IsCore ||
-                !previous.TryGetValue(gene.MatterSourceRegionId, out BodyRegion matterSource)
-                ? 1.0
-                : matterSource.TransportAvailability;
+            BodyRegion matterSource = default;
+            bool hasMatterSource = false;
+            if (!gene.IsCore)
+                for (int sourceIndex = 0; sourceIndex < _regions.Count; sourceIndex++)
+                    if (previous[sourceIndex].RegionId == gene.MatterSourceRegionId)
+                    {
+                        matterSource = previous[sourceIndex];
+                        hasMatterSource = true;
+                        break;
+                    }
+            double sourceTransport = hasMatterSource ? matterSource.TransportAvailability : 1.0;
             double targetTransport = sourceTransport * gene.Permeability *
                 (0.25 + (0.75 * outputs.PermeabilityGate));
             double transportBlend = 1.0 - Math.Exp(-(0.5 + (2.5 * gene.Permeability)) * deltaSeconds);
@@ -287,16 +353,23 @@ public sealed class DevelopingBody
                 0.0,
                 1.0);
             double activation = Math.Clamp(
-                outputs.ContractionActivation * gene.Contractility *
+                outputs.ContractionActivation * gene.Contractility * region.ContractileExpression *
                 (0.35 + (0.65 * ((nextSignal + 1.0) * 0.5))) *
                 (0.30 + (0.70 * gene.SignalConductivity)),
                 0.0,
                 1.0);
+            ExpressionTargets expression = ExpressionTargets.For(gene, region.Development, nextTransport, nextSignal);
+            double expressionBlend = 1.0 - Math.Exp(-deltaSeconds * (0.45 + 1.55 * nextTransport));
             _regions[index] = region with
             {
                 InternalSignal = nextSignal,
                 TransportAvailability = nextTransport,
-                Activation = activation
+                Activation = activation,
+                ExchangeExpression = Blend(region.ExchangeExpression, expression.Exchange, expressionBlend),
+                BarrierExpression = Blend(region.BarrierExpression, expression.Barrier, expressionBlend),
+                ContractileExpression = Blend(region.ContractileExpression, expression.Contractile, expressionBlend),
+                StructuralExpression = Blend(region.StructuralExpression, expression.Structural, expressionBlend),
+                SensoryExpression = Blend(region.SensoryExpression, expression.Sensory, expressionBlend)
             };
         }
     }
@@ -334,7 +407,7 @@ public sealed class DevelopingBody
     public double ConsumeRegionEnergy(int regionId, double requested)
     {
         if (!double.IsFinite(requested) || requested < 0) throw new ArgumentOutOfRangeException(nameof(requested));
-        int index = _regions.FindIndex(region => region.RegionId == regionId);
+        int index = IndexOfRegion(regionId);
         if (index < 0) return 0;
         BodyRegion region = _regions[index];
         double paid = Math.Min(region.Energy, requested);
@@ -387,16 +460,52 @@ public sealed class DevelopingBody
             double transportBlend = 1.0 - Math.Exp(-(0.5 + (2.5 * gene.Permeability)) * deltaSeconds);
             double nextTransport = Math.Clamp(region.TransportAvailability +
                 ((targetTransport - region.TransportAvailability) * transportBlend), 0.0, 1.0);
-            double activation = Math.Clamp(outputs.ContractionActivation * gene.Contractility *
+            ExpressionTargets expression = ExpressionTargets.For(gene, region.Development, nextTransport, nextSignal);
+            double expressionBlend = 1.0-Math.Exp(-deltaSeconds*(0.45+1.55*nextTransport));
+            double contractileExpression = Blend(region.ContractileExpression,expression.Contractile,expressionBlend);
+            double activation = Math.Clamp(outputs.ContractionActivation * gene.Contractility * contractileExpression *
                 (0.65 + (0.35 * ((nextSignal + 1.0) * 0.5))) *
                 (0.60 + (0.40 * gene.SignalConductivity)), 0.0, 1.0);
             _regions[index] = region with
-                { InternalSignal = nextSignal, TransportAvailability = nextTransport, Activation = activation };
+                { InternalSignal = nextSignal, TransportAvailability = nextTransport, Activation = activation,
+                    ExchangeExpression=Blend(region.ExchangeExpression,expression.Exchange,expressionBlend),
+                    BarrierExpression=Blend(region.BarrierExpression,expression.Barrier,expressionBlend),
+                    ContractileExpression=contractileExpression,
+                    StructuralExpression=Blend(region.StructuralExpression,expression.Structural,expressionBlend),
+                    SensoryExpression=Blend(region.SensoryExpression,expression.Sensory,expressionBlend)};
+        }
+    }
+
+    private static double Blend(double current,double target,double amount) =>
+        Math.Clamp(current+((target-current)*amount),0.0,1.0);
+
+    private readonly record struct ExpressionTargets(
+        double Exchange,double Barrier,double Contractile,double Structural,double Sensory)
+    {
+        public static ExpressionTargets For(RegionGene gene,double development,double transport,double signal)
+        {
+            // A region has a shared expression capacity. Pushing every program high
+            // dilutes each one as well as increasing construction/maintenance cost.
+            double total=gene.ExchangeExpression+gene.BarrierExpression+gene.ContractileExpression+
+                gene.StructuralExpression+gene.SensoryExpression;
+            double budgetScale=total>2.15?2.15/total:1.0;
+            double availability=Math.Clamp(development*(0.20+0.80*transport),0.0,1.0);
+            double signalModulation=0.82+0.18*((signal+1.0)*0.5);
+            return new(
+                gene.ExchangeExpression*budgetScale*availability*signalModulation,
+                gene.BarrierExpression*budgetScale*availability,
+                gene.ContractileExpression*budgetScale*availability*signalModulation,
+                gene.StructuralExpression*budgetScale*availability,
+                gene.SensoryExpression*budgetScale*availability*signalModulation);
         }
     }
 
     public void ApplyPoseGeometry(Genome genome, BodyPose pose)
     {
+        if (!_poseGeometryDirty && ++_poseGeometryAge < _precision.PoseGeometryIntervalSteps)
+            return;
+        _poseGeometryAge = 0;
+        _poseGeometryDirty = false;
         for (int index = 0; index < RestFunctionalGeometry.Length; index++)
         {
             BodyFunctionalGeometry functional = RestFunctionalGeometry[index];
@@ -437,7 +546,8 @@ public sealed class DevelopingBody
         Cache = BodyCalculator.Recalculate(genome, _regions);
         Geometry = BodyGeometryBuilder.Build(genome, _regions);
         RestFunctionalGeometry = BodyCalculator.BuildFunctionalGeometry(
-            genome, _regions, Cache.CenterOfMass, Geometry).ToArray();
+            genome, _regions, Cache.CenterOfMass, Geometry,
+            _precision.SurfaceSamplesPerRegion).ToArray();
         PosedFunctionalGeometry = new BodyFunctionalGeometry[RestFunctionalGeometry.Length];
         PosedSurfaceSamples = new BodySurfaceSample[RestFunctionalGeometry.Length][];
         for (int index = 0; index < RestFunctionalGeometry.Length; index++)
@@ -447,6 +557,9 @@ public sealed class DevelopingBody
             PosedFunctionalGeometry[index] = RestFunctionalGeometry[index] with { SurfaceSamples = samples };
         }
         FunctionalGeometry = PosedFunctionalGeometry;
+        _poseGeometryDirty = true;
+        _growthGeometryAge = 0;
+        _growthGeometryPending = false;
     }
 
     public double LimitTotalEnergy(double maximum)
@@ -530,7 +643,10 @@ public static class BodyCalculator
         double propertyBudget =
             gene.Density + gene.Rigidity + gene.Toughness + gene.Permeability +
             gene.LightReactivity + gene.CatalyticActivity + gene.Contractility +
-            gene.SignalConductivity + gene.StorageFraction + gene.Pigment;
+            gene.SignalConductivity + gene.StorageFraction + gene.Pigment +
+            gene.ExchangeExpression + gene.BarrierExpression + gene.ContractileExpression +
+            gene.StructuralExpression + gene.SensoryExpression + gene.CavityFraction +
+            gene.CavityAperture + Math.Abs(gene.JointRestPitch) + gene.JointMobility;
         return 0.12 +
             (gene.TargetLength * gene.TargetWidth) *
             (0.35 + (0.65 * gene.Density)) *
@@ -686,14 +802,17 @@ public static class BodyCalculator
         IReadOnlyList<BodyRegion> bodyRegions,
         Vector2 centerOfMass)
         => BuildFunctionalGeometry(genome, bodyRegions, centerOfMass,
-            BodyGeometryBuilder.Build(genome, bodyRegions));
+            BodyGeometryBuilder.Build(genome, bodyRegions),
+            CorePrecisionProfile.Reference.SurfaceSamplesPerRegion);
 
     public static IReadOnlyList<BodyFunctionalGeometry> BuildFunctionalGeometry(
         Genome genome,
         IReadOnlyList<BodyRegion> bodyRegions,
         Vector2 centerOfMass,
-        BodyGeometry geometry)
+        BodyGeometry geometry,
+        int surfaceSampleCount = 16)
     {
+        if(surfaceSampleCount is <8 or >32)throw new ArgumentOutOfRangeException(nameof(surfaceSampleCount));
         IReadOnlyList<BodyVisualRegion> visuals = BuildVisualRegions(geometry);
         Dictionary<int, RegionGene> genes = genome.Regions.ToDictionary(gene => gene.RegionId);
         Dictionary<int, BodyVisualRegion> byId = visuals.ToDictionary(region => region.RegionId);
@@ -720,7 +839,7 @@ public static class BodyCalculator
         foreach (BodyVisualRegion visual in visuals)
         {
             RegionGene gene = genes[visual.RegionId];
-            const int sampleCount = 16;
+            int sampleCount = surfaceSampleCount;
             double perimeterSurface = 2.0 * (visual.Length + visual.Width);
             double thickness = Math.Max(0.08, visual.Thickness);
             Vector2 forward = new((float)Math.Cos(visual.Angle), (float)Math.Sin(visual.Angle));

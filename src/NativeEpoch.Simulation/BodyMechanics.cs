@@ -128,7 +128,8 @@ public sealed class BodyPose
             Vector2 childStart = StartOf(child), parentEnd = EndOf(parent);
             Vector2 gap = parentEnd - childStart;
             RegionGene gene = _genes[childId];
-            double k = 0.05 + 4.95 * gene.Rigidity;
+            double structural=_inventories[childId].StructuralExpression;
+            double k = 0.05 + 4.95 * gene.Rigidity*structural;
             Vector2 connection = gap * (float)k;
             _forces[childId] += connection; _forces[parentId] -= connection;
             double restRelative = _rest[childId].Angle-_rest[parentId].Angle;
@@ -156,8 +157,9 @@ public sealed class BodyPose
             BodyPoseRegion before = _old[id];
             double axialError = _targetLengths[id] - before.Length;
             double angularError = Normalize(_targetAngles[id] - before.Angle);
-            double axialForce = (0.6 + 3.0 * gene.Rigidity) * axialError;
-            double actuatorTorque = (0.3 + 1.8 * gene.Rigidity) * angularError;
+            double expressedRigidity=gene.Rigidity*_inventories[id].StructuralExpression;
+            double axialForce = (0.6 + 3.0 * expressedRigidity) * axialError;
+            double actuatorTorque = (0.3 + 1.8 * expressedRigidity) * angularError;
             double desiredDl = axialError * (1.0-Math.Exp(-(1.8+(1.2*gene.Contractility))*dt));
             double desiredDa = angularError * (1.0-Math.Exp(-(2.0+(1.4*gene.Contractility))*dt));
             if(reciprocalDiagnostic){desiredDl=_targetLengths[id]-before.Length;desiredDa=0;}
@@ -190,9 +192,9 @@ public sealed class BodyPose
             requestedWork+=slipWork;energySpent+=slipPaid;
 
             Vector2 velocity = (_regionVelocities[id] + _forces[id] * (float)(dt / Math.Max(0.1, _inventories[id].Matter)))
-                * (float)Math.Exp(-(2.0 + 2.0 * gene.Rigidity) * dt);
+                * (float)Math.Exp(-(2.0 + 2.0 * expressedRigidity) * dt);
             double angularVelocity = (_regionAngularVelocities[id] + _torques[id] * dt /
-                Math.Max(0.05, before.Length * before.Length)) * Math.Exp(-(2.2 + gene.Rigidity) * dt);
+                Math.Max(0.05, before.Length * before.Length)) * Math.Exp(-(2.2 + expressedRigidity) * dt);
             double length = Math.Clamp(before.Length + desiredDl, region.Length * 0.70, region.Length * 1.05);
             double angle = before.Angle + desiredDa + angularVelocity * dt;
             Vector2 center = before.LocalCenter + velocity * (float)dt;

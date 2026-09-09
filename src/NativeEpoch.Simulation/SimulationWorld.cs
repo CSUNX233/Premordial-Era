@@ -44,15 +44,16 @@ public sealed class SimulationWorld
         _organisms = new(Math.Min(config.MaxPopulation, ancestorCount * 2));
         _nextOrganisms = new(Math.Min(config.MaxPopulation, ancestorCount * 2));
         Genomes = new GenomeRegistry();
-        Genome ancestorGenome = founderGenome ?? Genome.CreateAncestor();
-        int ancestorGenomeId = Genomes.Register(ancestorGenome);
+        Genome? sharedFounder = founderGenome ?? (config.RandomizeFounders ? null : Genome.CreateAncestor());
         SpatialOccupancyIndex initialOccupancy=new(_config.SeparationRadius);
 
         for (int index = 0; index < ancestorCount; index++)
         {
+            Genome ancestorGenome = sharedFounder ?? AquaticFounderFactory.Create(streams.Founders);
+            int ancestorGenomeId = Genomes.Register(ancestorGenome);
             DevelopingBody body = new(
                 ancestorGenome, config.CoreInitialMatter, config.AncestorStoredMatter,
-                config.AncestorEnergy, config.AncestorInternalOxygen, config.CoreInitialMatter);
+                config.AncestorEnergy, config.AncestorInternalOxygen, config.CoreInitialMatter, config.PrecisionProfile);
             (Vector2 position, float depth) = FindAquaticSpawn(streams.Placement, body,initialOccupancy);
             Organism ancestor=new()
             {
@@ -61,8 +62,12 @@ public sealed class SimulationWorld
                 HeadingRadians = streams.Placement.NextUnitDouble() * Math.Tau,
                 Hydration = RegionalPhysiology.BodyHydration(body, ancestorGenome), Immersion = 1.0,
                 ControllerState = new double[ancestorGenome.ControllerNodes.Count],
+                SensorState = new double[ancestorGenome.Sensors.Count],
+                TissueControllerInputs = new double[ancestorGenome.ControllerNodes.Count],
                 ForagingMemory = new ForagingMemory(), Body = body,
                 Pose = new BodyPose(ancestorGenome, body), Generation = 0,
+                AppendageMechanics=new AppendageMechanics(),AppendageRegions=[],
+                CavityState=new CavitySystemState(),
                 ResourceSatisfaction=1.0
             };
             _organisms.Add(ancestor);
@@ -207,7 +212,18 @@ public sealed class SimulationWorld
 
             RegionalPhysiology.TransportAlongMatterEdges(organism.Body, genome, _config, dt);
             EnvironmentSample controllerEnvironment = _environment.Sample(organism.Position, organism.Depth);
-            ForagingObservation foragingObservation=SenseForaging(organism,genome);
+            TissueSensingResult sensing=TissueSensing.Evaluate(organism.Body,genome,_environment,
+                organism.Position,organism.HeadingRadians,organism.Depth,organism.ContactPressure,
+                _config,dt,ref organism.SensorState,ref organism.TissueControllerInputs);
+            organism.ActiveSensorCount=sensing.ActiveSensorCount;
+            organism.ChemicalSensorSignal=sensing.ChemicalSignal;
+            organism.ContactSensorSignal=sensing.ContactSignal;
+            organism.ActiveVisualSensorCount=sensing.ActiveVisualSensorCount;
+            organism.VisionSignal=sensing.VisionSignal;
+            organism.ChemicalSenseAccess=sensing.ChemicalAccess;
+            organism.SensingEnergyLastStep=sensing.EnergySpent;
+            CumulativeDissipatedEnergy+=sensing.EnergySpent;
+            ForagingObservation foragingObservation=SenseForaging(organism,genome,sensing.ChemicalAccess);
             double energyFraction=Math.Clamp(organism.Body.TotalEnergy/_config.MaximumEnergy,0,1);
             double meanConductivity=genome.Regions.Average(region=>region.SignalConductivity);
             ForagingDecision foraging=BehaviorController.UpdateForaging(organism.ForagingMemory,
@@ -217,17 +233,20 @@ public sealed class SimulationWorld
             organism.ExplorationDrive=foraging.Activity;
             organism.SteeringDrive=foraging.Steering;
             organism.ControllerInputs = new ControllerInputs(
-                Math.Clamp(controllerEnvironment.Light, 0, 1),
-                Math.Clamp((controllerEnvironment.Temperature - 5.0) / 35.0, -1, 1),
-                Math.Clamp((controllerEnvironment.Pressure - 1.0) / 10.0, 0, 1),
+                sensing.AmbientLightSignal,
+                sensing.TemperatureSignal,
+                sensing.PressureSignal,
                 Math.Clamp(organism.Body.TotalEnergy / _config.MaximumEnergy, 0, 1),
                 Math.Clamp(organism.Body.TotalSubstrate / Math.Max(0.1, organism.Body.Cache.TotalMatter), 0, 1),
                 organism.Hydration,
-                Math.Clamp(organism.ContactPressure, 0, 1),
-                foraging.ResourceGradient,foraging.ResourceLateral,foraging.ResourceTrend,
-                foraging.Novelty,foraging.Danger,foraging.ExplorationSignal);
+                sensing.ContactSignal,
+                foraging.ResourceGradient*sensing.ChemicalAccess,
+                foraging.ResourceLateral*sensing.ChemicalAccess,
+                foraging.ResourceTrend*sensing.ChemicalAccess,
+                foraging.Novelty,foraging.Danger*sensing.ChemicalAccess,foraging.ExplorationSignal);
             ControllerEvaluation control = BehaviorController.Evaluate(
-                genome, organism.ControllerState, organism.ControllerInputs);
+                genome, organism.ControllerState, organism.ControllerInputs,
+                organism.TissueControllerInputs);
             double controllerCost = genome.ControllerNodes.Count * _config.ControllerNodeEnergyPerSecond * dt;
             double controllerPaid = organism.Body.ConsumeEnergy(controllerCost);
             organism.ControllerState = control.State;
@@ -243,6 +262,7 @@ public sealed class SimulationWorld
             }
 
             MoveOrganism(ref organism, genome, interaction.Acceleration, dt);
+            StepCavities(ref organism,genome,dt);
             ApplyMediumStress(ref organism, genome, dt);
             if (CollectPerformanceMetrics)
             {
@@ -283,24 +303,30 @@ public sealed class SimulationWorld
                 MutationResult inheritance = _mutationsEnabled
                     ? _mutator.Inherit(genome, _mutationRandom, _controllerMutationRandom)
                     : new MutationResult(genome, MutationKind.None, "mutation frozen for paired assay");
-                DevelopingBody provisional=new(inheritance.Genome,_config.CoreInitialMatter,
-                    _config.NewbornSubstrate,_config.NewbornEnergy,0.0,_config.CoreInitialMatter*0.5);
+                double childCoreMatter=NewbornCoreMatter(inheritance.Genome);
+                DevelopingBody provisional=new(inheritance.Genome,childCoreMatter,
+                    _config.NewbornSubstrate,_config.NewbornEnergy,0.0,childCoreMatter*0.5,_config.PrecisionProfile);
                 if(TryFindNewbornPlacement(organism,provisional,occupancy,out Vector2 childPosition,out float childDepth))
                 {
                     organism.Body.ConsumeEnergy(_config.ReproductionEnergyCost);
-                    organism.Body.ConsumeSubstrate(_config.CoreInitialMatter + _config.NewbornSubstrate);
+                    organism.Body.ConsumeSubstrate(childCoreMatter + _config.NewbornSubstrate);
                     organism.ReproductionCooldownSeconds = _config.ReproductionCooldownSeconds;
                     CumulativeDissipatedEnergy += _config.ReproductionEnergyCost - _config.NewbornEnergy;
                     int childGenomeId = Genomes.Register(inheritance.Genome);
                     ulong childId = _nextOrganismId++;
                     Organism child = CreateNewborn(childId, ref organism, childGenomeId,
                         inheritance.Genome,childPosition,childDepth);
+                    child.BirthMutationCount=inheritance.EventCount;
                     _birthBuffer.Add(child);
                     occupancy.Upsert(new SpatialOccupant(child.Id,child.Position,child.Depth,
                         OccupancyShape.FromBody(child.Body)));
                     AddBirthRecord(new(organism.Id, childId, organism.GenomeId, childGenomeId,
                         genome.Regions.Count, inheritance.Genome.Regions.Count,
-                        inheritance.Kind, inheritance.Summary));
+                        inheritance.Kind, inheritance.Summary)
+                    {
+                        MutationEventCount=inheritance.EventCount,
+                        MutationEventKinds=inheritance.EventKinds
+                    });
                     reproductionSlots--;
                     CumulativeBirths++;
                 }
@@ -329,6 +355,8 @@ public sealed class SimulationWorld
                 CumulativeDissipatedEnergy += organism.Body.TotalEnergy;
                 _environment.DepositDetritus(
                     organism.Position, organism.Body.Cache.TotalMatter + organism.Body.TotalSubstrate);
+                CavityPhysiology.ReleaseAll(organism.CavityState,_environment,
+                    organism.Position,organism.Depth,organism.Immersion);
                 _environment.DepositOxygen(organism.Position, organism.Depth, organism.Immersion,
                     organism.Body.TotalOxygen);
                 CumulativeWaterLoss += organism.Body.TotalWater;
@@ -396,10 +424,26 @@ public sealed class SimulationWorld
                 o.Body.Regions.ToArray())
             {
                 Generation=o.Generation,ExplorationDrive=o.ExplorationDrive,
+                BirthMutationCount=o.BirthMutationCount,
+                OffspringMutationProbability=_mutationsEnabled?GenomeMutator.NaturalMutationProbability(g.MutationRate):0,
                 ForagingTrend=o.ForagingTrend,ContactNeighborCount=o.ContactNeighborCount,
                 InteractionOpponentId=o.InteractionOpponentId,InteractionState=o.InteractionState,
                 InteractionIntensity=o.InteractionIntensity,InteractionDirection=o.InteractionDirection,
-                ResourceSatisfaction=o.ResourceSatisfaction,ResourceDemandLastStep=o.ResourceDemandLastStep
+                ResourceSatisfaction=o.ResourceSatisfaction,ResourceDemandLastStep=o.ResourceDemandLastStep,
+                MeanTissueExpression=o.Body.Regions.Count>0?o.Body.Regions.Average(region=>(
+                    region.ExchangeExpression+region.BarrierExpression+region.ContractileExpression+
+                    region.StructuralExpression+region.SensoryExpression)/5.0):0.0,
+                ActiveSensorCount=o.ActiveSensorCount,ChemicalSensorSignal=o.ChemicalSensorSignal,
+                ContactSensorSignal=o.ContactSensorSignal,SensingEnergyLastStep=o.SensingEnergyLastStep,
+                ActiveVisualSensorCount=o.ActiveVisualSensorCount,VisionSignal=o.VisionSignal,
+                BodyCenterElevation=BodyCenterElevation(o),AppendageRegions=o.AppendageRegions.ToArray(),
+                AppendageContactCount=o.AppendageContactCount,AppendageSupport=o.AppendageSupport,
+                AppendageGroundVelocity=o.AppendageGroundVelocity,AppendageEnergyLastStep=o.AppendageEnergyLastStep,
+                CavityOxygen=o.CavityState.TotalOxygen,
+                CavityOxygenCapacity=o.CavityState.Regions.Sum(region=>region.OxygenCapacity),
+                CavityVentilationLastStep=o.CavityVentilationLastStep,
+                CavityTissueOxygenLastStep=o.CavityTissueOxygenLastStep,
+                CavityEnergyLastStep=o.CavityEnergyLastStep
             };
         }
         return new(CaptureSnapshot(fullValidation: false), result);
@@ -415,6 +459,22 @@ public sealed class SimulationWorld
         return geometry;
     }
 
+    private double NewbornCoreMatter(Genome genome)
+    {
+        // Small inherited bodies remain valid juveniles, with exactly this
+        // amount debited from the parent's substrate before the birth.
+        RegionGene core=genome.Regions.First(region=>region.IsCore);
+        return Math.Min(_config.CoreInitialMatter,BodyCalculator.TargetMatter(core)*0.8);
+    }
+
+    private double BodyCenterElevation(Organism organism)
+    {
+        EnvironmentSample sample=_environment.Sample(organism.Position,organism.Depth);
+        return sample.WaterDepth>0.0
+            ?sample.WaterSurface-organism.Depth
+            :sample.TerrainHeight+OccupancyShape.FromBody(organism.Body).VerticalHalfExtent;
+    }
+
     public SimulationSnapshot CaptureSnapshot() => CaptureSnapshot(fullValidation: true);
 
     private SimulationSnapshot CaptureSnapshot(bool fullValidation)
@@ -427,7 +487,7 @@ public sealed class SimulationWorld
         {
             Genome g = Genomes.Get(o.GenomeId);
             bodyMatter += o.Body.Cache.TotalMatter; stored += o.Body.TotalSubstrate;
-            energy += o.Body.TotalEnergy; organismOxygen += o.Body.TotalOxygen;
+            energy += o.Body.TotalEnergy; organismOxygen += o.Body.TotalOxygen+o.CavityState.TotalOxygen;
             maturity += o.Maturity; speed += o.Velocity.Length(); depth += o.Depth;
             hydration += o.Hydration; regions += o.Body.RegionCount;
             if (o.Immersion >= 0.8) aquatic++; else if (o.Immersion > 0.05) shore++; else land++;
@@ -558,8 +618,8 @@ public sealed class SimulationWorld
         double transferredWater = Math.Min(parent.Body.TotalWater * 0.12, _config.CoreInitialMatter * 0.5);
         parent.Body.ConsumeOxygen(transferredOxygen);
         parent.Body.ConsumeWater(transferredWater);
-        DevelopingBody body = new(genome, _config.CoreInitialMatter, _config.NewbornSubstrate, _config.NewbornEnergy,
-            transferredOxygen, transferredWater);
+        DevelopingBody body = new(genome, NewbornCoreMatter(genome), _config.NewbornSubstrate, _config.NewbornEnergy,
+            transferredOxygen, transferredWater, _config.PrecisionProfile);
         return new Organism
         {
             Id = id, ParentId = parent.Id, GenomeId = genomeId, Position = position,
@@ -568,8 +628,12 @@ public sealed class SimulationWorld
             Hydration = RegionalPhysiology.BodyHydration(body, genome), Immersion = 1,
             ReproductionCooldownSeconds = _config.ReproductionCooldownSeconds,
             ControllerState = new double[genome.ControllerNodes.Count],
+            SensorState = new double[genome.Sensors.Count],
+            TissueControllerInputs = new double[genome.ControllerNodes.Count],
             ForagingMemory = new ForagingMemory(), Body = body,
             Pose = new BodyPose(genome, body), Generation = parent.Generation + 1,
+            AppendageMechanics=new AppendageMechanics(),AppendageRegions=[],
+            CavityState=new CavitySystemState(),
             ResourceSatisfaction=1.0
         };
     }
@@ -627,7 +691,7 @@ public sealed class SimulationWorld
             : DeathCause.Senescence;
     }
 
-    private ForagingObservation SenseForaging(Organism organism,Genome genome)
+    private ForagingObservation SenseForaging(Organism organism,Genome genome,double chemicalAccess)
     {
         float distance=(float)Math.Max(_config.ForagingSenseDistance,organism.Body.Cache.BoundingRadius*2.5);
         Vector2 forward=new((float)Math.Cos(organism.HeadingRadians),(float)Math.Sin(organism.HeadingRadians));
@@ -638,6 +702,12 @@ public sealed class SimulationWorld
         Vector2 left=Clamp(center-right*distance);
         Vector2 rightPosition=Clamp(center+right*distance);
         EnvironmentSample centerSample=_environment.Sample(center,organism.Depth);
+        if(chemicalAccess<=0.01)
+        {
+            double cue=ResourceCue(centerSample,organism,genome);
+            double danger=EnvironmentalDanger(centerSample,organism,genome);
+            return new(center,center,center,center,cue,cue,cue,cue,danger,danger,danger,danger);
+        }
         EnvironmentSample aheadSample=_environment.Sample(ahead,organism.Depth);
         EnvironmentSample leftSample=_environment.Sample(left,organism.Depth);
         EnvironmentSample rightSample=_environment.Sample(rightPosition,organism.Depth);
@@ -693,16 +763,32 @@ public sealed class SimulationWorld
             organism.Depth <= supportHalfThickness + 1e-5f;
         BodyMechanicsResult mechanics = organism.Pose.Step(genome, organism.Body,
             organism.ControllerOutputs, organism.AgeSeconds, organism.Immersion,
-            organism.Hydration, _config, dt, groundSupported, false);
+            organism.Hydration, _config, dt, false, false);
         organism.Body.ApplyPoseGeometry(genome, organism.Pose);
+        double centerElevation=preMoveEnvironment.WaterDepth>0.0
+            ?preMoveEnvironment.WaterSurface-organism.Depth
+            :preMoveEnvironment.TerrainHeight+supportHalfThickness;
+        AppendageMechanicsResult appendage=organism.AppendageMechanics.Step(genome,organism.Body,
+            organism.Pose,organism.ControllerOutputs,organism.Position,organism.HeadingRadians,
+            centerElevation,_environment,_config,organism.AgeSeconds,dt,true);
+        organism.AppendageRegions=appendage.Regions;
+        int plantedContacts=0;
+        for(int contactIndex=0;contactIndex<appendage.Contacts.Count;contactIndex++)
+            if(appendage.Contacts[contactIndex].Planted)plantedContacts++;
+        organism.AppendageContactCount=plantedContacts;
+        organism.AppendageSupport=appendage.SupportFraction;
+        organism.AppendageGroundVelocity=appendage.GroundVelocity;
+        organism.AppendageEnergyLastStep=appendage.EnergySpent;
         double c = Math.Cos(organism.HeadingRadians), s = Math.Sin(organism.HeadingRadians);
         Vector2 local = mechanics.MediumVelocity;
-        Vector2 reactionVelocity = new((float)(local.X * c - local.Y * s), (float)(local.X * s + local.Y * c));
+        Vector2 reactionVelocity = appendage.GroundVelocity+
+            new Vector2((float)(local.X * c - local.Y * s), (float)(local.X * s + local.Y * c));
         double mobility = MediumMobility(organism.Immersion, organism.Hydration, genome.Metabolism.WaterRetention);
         // The mechanics solve returns a velocity from the force/torque balance,
         // rather than an acceleration.  Separation is the only acceleration here.
         organism.Velocity = reactionVelocity + separation * (float)dt;
-        organism.HeadingRadians = NormalizeAngle(organism.HeadingRadians + mechanics.AngularVelocity * dt);
+        double angularVelocity=appendage.AngularVelocity+mechanics.AngularVelocity;
+        organism.HeadingRadians = NormalizeAngle(organism.HeadingRadians + angularVelocity * dt);
         organism.LocalActuationForce = mechanics.NetExternalForce;
         organism.ActuationTorque = mechanics.NetExternalTorque;
         float maxSpeed = (float)(_config.MaximumMovementSpeed * mobility /
@@ -710,8 +796,8 @@ public sealed class SimulationWorld
         if (organism.Velocity.Length() > maxSpeed && maxSpeed > 0)
             organism.Velocity = Vector2.Normalize(organism.Velocity) * maxSpeed;
         Vector2 displacement = organism.Velocity * (float)dt;
-        CumulativeDissipatedEnergy += mechanics.EnergySpent;
-        CumulativeMovementEnergy += mechanics.EnergySpent;
+        CumulativeDissipatedEnergy += mechanics.EnergySpent+appendage.EnergySpent;
+        CumulativeMovementEnergy += mechanics.EnergySpent+appendage.EnergySpent;
         organism.Position += displacement;
         ClampHorizontal(ref organism);
 
@@ -727,6 +813,62 @@ public sealed class SimulationWorld
                 half, (float)Math.Max(half, sample.WaterDepth - half));
         }
         else { organism.Depth = 0; organism.VerticalVelocity = 0; }
+    }
+
+    private void StepCavities(ref Organism organism,Genome genome,double dt)
+    {
+        Span<CavityRegionInput> inputs=stackalloc CavityRegionInput[GenomeValidator.MaximumRegions];
+        int count=0;
+        double c=Math.Cos(organism.HeadingRadians),s=Math.Sin(organism.HeadingRadians);
+        double centerElevation=BodyCenterElevation(organism);
+        foreach(BodyRegion region in organism.Body.Regions)
+        {
+            RegionGene gene=genome.GetRegion(region.RegionId);
+            int bodyIndex=organism.Body.IndexOfRegion(region.RegionId);
+            BodyFunctionalGeometry functional=organism.Body.FunctionalGeometry[bodyIndex];
+            BodyGeometryRegion geometry=organism.Body.Geometry.Regions[bodyIndex];
+            BodySurfaceSample apertureSample=default;
+            bool connected=false;
+            int sampleCount=functional.SurfaceSamples.Count;
+            int start=sampleCount>0?Math.Abs(region.RegionId)%sampleCount:0;
+            if(sampleCount>0)
+            {apertureSample=functional.SurfaceSamples[start];connected=apertureSample.ExternallyConnected;}
+            double liftedY=0.0;
+            foreach(AppendageRegionPose pose in organism.AppendageRegions)
+                if(pose.RegionId==region.RegionId){liftedY=(pose.LocalStart.Y+pose.LocalEnd.Y)*0.5;break;}
+            Vector2 samplePosition=organism.Position;
+            float sampleDepth=organism.Depth;
+            double air=0,water=0;
+            if(connected)
+            {
+                double localX=apertureSample.LocalPosition.X*c-apertureSample.LocalPosition.Z*s;
+                double localY=apertureSample.LocalPosition.X*s+apertureSample.LocalPosition.Z*c;
+                samplePosition=Vector2.Clamp(organism.Position+new Vector2((float)localX,(float)localY),
+                    Vector2.Zero,new Vector2(_config.WorldSize));
+                EnvironmentSample surface=_environment.Sample(samplePosition);
+                double elevation=centerElevation+apertureSample.LocalPosition.Y+liftedY;
+                bool insideTerrain=elevation<surface.TerrainHeight;
+                bool waterSide=!insideTerrain&&surface.WaterDepth>0&&elevation<=surface.WaterSurface;
+                sampleDepth=waterSide?(float)Math.Clamp(surface.WaterSurface-elevation,0,surface.WaterDepth):0;
+                if(insideTerrain)connected=false;
+                else if(waterSide)water=1;else air=1;
+            }
+            CavityExpression expression=new(gene.CavityFraction,gene.CavityAperture,
+                region.ExchangeExpression,region.BarrierExpression,region.ContractileExpression,
+                region.StructuralExpression);
+            bool transportConnected=gene.IsCore||
+                (region.TransportAvailability>0.02&&functional.MatterTransportEfficiency>0.01);
+            inputs[count++]=new CavityRegionInput(region.RegionId,geometry.AnalyticVolume,
+                RegionalPhysiology.OxygenCapacity(region,_config),transportConnected,water,
+                expression,new CavityApertureContact(samplePosition,sampleDepth,connected,air,water));
+        }
+        CavityStepResult result=CavityPhysiology.StepBody(organism.CavityState,organism.Body,
+            _environment,inputs[..count],dt);
+        organism.CavityVentilationLastStep=result.OxygenTakenFromEnvironment;
+        organism.CavityTissueOxygenLastStep=result.OxygenDeliveredToTissue;
+        organism.CavityEnergyLastStep=result.EnergySpent;
+        CumulativeOxygenUptake+=result.OxygenTakenFromEnvironment;
+        CumulativeDissipatedEnergy+=result.EnergySpent;
     }
 
     public static double MediumMobility(double immersion, double hydration, double retention) =>
@@ -903,7 +1045,7 @@ public sealed class SimulationWorld
         if (_recentDeaths.Count == RecordLimit) _recentDeaths.RemoveAt(0);
         _recentDeaths.Add(new DeathRecord(StepIndex, organism.Id, organism.ParentId, cause,
             organism.AgeSeconds, organism.Body.TotalEnergy, organism.Body.TotalSubstrate,
-            organism.Body.TotalOxygen, organism.Hydration,
+            organism.Body.TotalOxygen+organism.CavityState.TotalOxygen, organism.Hydration,
             organism.Body.DevelopmentCompletion(genome)));
         switch (cause)
         {
@@ -915,7 +1057,8 @@ public sealed class SimulationWorld
 
     private double CalculateTotalMatter() => _environment.TotalMinerals + _environment.TotalDetritus +
         _environment.TotalMetabolicWaste + _organisms.Sum(o => o.Body.Cache.TotalMatter + o.Body.TotalSubstrate);
-    private double CalculateTotalOxygen() => _environment.TotalOxygen + _organisms.Sum(o => o.Body.TotalOxygen);
+    private double CalculateTotalOxygen() => _environment.TotalOxygen +
+        _organisms.Sum(o => o.Body.TotalOxygen+o.CavityState.TotalOxygen);
 
     private ulong ComputeFingerprint()
     {
@@ -935,6 +1078,7 @@ public sealed class SimulationWorld
         {
             FingerprintHash.Add(ref hash, o.Id); FingerprintHash.Add(ref hash, o.ParentId);
             FingerprintHash.Add(ref hash, unchecked((ulong)o.GenomeId));
+            FingerprintHash.Add(ref hash, unchecked((ulong)o.BirthMutationCount));
             FingerprintHash.Add(ref hash, unchecked((uint)BitConverter.SingleToInt32Bits(o.Position.X)));
             FingerprintHash.Add(ref hash, unchecked((uint)BitConverter.SingleToInt32Bits(o.Position.Y)));
             FingerprintHash.Add(ref hash, unchecked((uint)BitConverter.SingleToInt32Bits(o.Depth)));
@@ -945,11 +1089,27 @@ public sealed class SimulationWorld
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(o.Maturity)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(o.Hydration)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(o.Immersion)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(o.HeadingRadians)));
             foreach (BodyRegion r in o.Body.Regions.OrderBy(r => r.RegionId))
             {
                 FingerprintHash.Add(ref hash, unchecked((ulong)r.RegionId));
-                foreach (double value in new[] { r.Matter, r.Substrate, r.Oxygen, r.Water, r.Energy, r.Damage })
+                foreach (double value in new[] { r.Matter, r.Substrate, r.Oxygen, r.Water, r.Energy, r.Damage,
+                             r.InternalSignal,r.TransportAvailability,r.Activation,r.ExchangeExpression,
+                             r.BarrierExpression,r.ContractileExpression,r.StructuralExpression,r.SensoryExpression })
                     FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(value)));
+            }
+            foreach(double value in o.SensorState)
+                FingerprintHash.Add(ref hash,unchecked((ulong)BitConverter.DoubleToInt64Bits(value)));
+            foreach(AppendageRegionPose pose in o.AppendageRegions.OrderBy(region=>region.RegionId))
+            {
+                FingerprintHash.Add(ref hash,unchecked((ulong)pose.RegionId));
+                FingerprintHash.Add(ref hash,unchecked((ulong)BitConverter.DoubleToInt64Bits(pose.JointPitch)));
+            }
+            foreach(CavityRegionState cavity in o.CavityState.Regions.OrderBy(region=>region.RegionId))
+            {
+                FingerprintHash.Add(ref hash,unchecked((ulong)cavity.RegionId));
+                FingerprintHash.Add(ref hash,unchecked((ulong)BitConverter.DoubleToInt64Bits(cavity.Oxygen)));
+                FingerprintHash.Add(ref hash,unchecked((ulong)BitConverter.DoubleToInt64Bits(cavity.FloodedFraction)));
             }
         }
         return hash;

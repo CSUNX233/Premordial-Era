@@ -12,7 +12,15 @@ internal static class HeadlessProgram
             bool diagnoseEcology = args.Contains("--diagnose-ecology");
             bool diagnoseMovement = args.Contains("--diagnose-movement");
             bool diagnoseCompetition = args.Contains("--diagnose-competition");
-            Options options = Options.Parse(args.Where(a => a != "--diagnose-ecology" && a != "--diagnose-movement" && a != "--diagnose-competition").ToArray());
+            bool diagnoseTissue = args.Contains("--diagnose-tissue");
+            bool diagnoseVision = args.Contains("--diagnose-vision");
+            bool diagnoseAppendage = args.Contains("--diagnose-appendage");
+            bool diagnoseCavity = args.Contains("--diagnose-cavity");
+            bool diagnoseFounders = args.Contains("--diagnose-founders");
+            bool diagnosePrecision = args.Contains("--diagnose-precision");
+            bool diagnoseWorldPrecision = args.Contains("--diagnose-world-precision");
+            bool diagnoseDistribution = args.Contains("--diagnose-mutation-distribution");
+            Options options = Options.Parse(args.Where(a => a != "--diagnose-ecology" && a != "--diagnose-movement" && a != "--diagnose-competition" && a != "--diagnose-tissue" && a != "--diagnose-vision" && a != "--diagnose-appendage" && a != "--diagnose-cavity" && a != "--diagnose-founders" && a != "--diagnose-precision" && a != "--diagnose-world-precision" && a != "--diagnose-mutation-distribution").ToArray());
             if (options.ShowHelp)
             {
                 PrintHelp();
@@ -21,12 +29,68 @@ internal static class HeadlessProgram
 
             if (diagnoseEcology)
                 return EcologyDiagnostics.Run(CreateWorld(options), options.Steps, options.ReportEvery);
+            if (diagnoseFounders)
+            {
+                var result = AquaticFounderDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed ? "FOUNDERS PASS" : "FOUNDERS FAIL");
+                return result.Passed ? 0 : 1;
+            }
+            if (diagnosePrecision)
+            {
+                var result = CorePrecisionDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed ? "PRECISION PASS" : "PRECISION FAIL");
+                return result.Passed ? 0 : 1;
+            }
+            if (diagnoseWorldPrecision)
+            {
+                var result = WorldPrecisionDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed ? "WORLD PRECISION PASS" : "WORLD PRECISION FAIL");
+                return result.Passed ? 0 : 1;
+            }
+            if (diagnoseDistribution)
+            {
+                var result = MutationDistributionDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed ? "MUTATION DISTRIBUTION PASS" : "MUTATION DISTRIBUTION FAIL");
+                return result.Passed ? 0 : 1;
+            }
             if (diagnoseCompetition)
             {
                 SpatialCompetitionDiagnosticResult result = SpatialCompetitionDiagnostics.Run();
                 Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
                 Console.WriteLine(result.Passed ? "COMPETITION PASS" : "COMPETITION FAIL");
                 return result.Passed ? 0 : 1;
+            }
+            if (diagnoseTissue)
+            {
+                TissueExpressionDiagnosticResult result=TissueExpressionDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed?"TISSUE PASS":"TISSUE FAIL");
+                return result.Passed?0:1;
+            }
+            if (diagnoseVision)
+            {
+                DirectionalVisionDiagnosticResult result=DirectionalVisionDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed?"VISION PASS":"VISION FAIL");
+                return result.Passed?0:1;
+            }
+            if(diagnoseAppendage)
+            {
+                AppendageMechanicsDiagnosticResult result=AppendageMechanicsDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed?"APPENDAGE PASS":"APPENDAGE FAIL");
+                return result.Passed?0:1;
+            }
+            if(diagnoseCavity)
+            {
+                CavityPhysiologyDiagnosticResult result=CavityPhysiologyDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed?"CAVITY PASS":"CAVITY FAIL");
+                return result.Passed?0:1;
             }
             if (diagnoseMovement)
             {
@@ -681,6 +745,10 @@ internal static class HeadlessProgram
         Console.WriteLine("  --diagnose-ecology       track actual generations, reproductive bottlenecks and survival");
         Console.WriteLine("  --diagnose-movement      check steering authority, 120 s exploration and low-energy rest");
         Console.WriteLine("  --diagnose-competition   check occupied space, paid contact and finite food sharing");
+        Console.WriteLine("  --diagnose-founders      check seeded primitive aquatic diversity and inheritance");
+        Console.WriteLine("  --diagnose-precision     compare reference and reduced surface integration");
+        Console.WriteLine("  --diagnose-world-precision compare complete simulation step cost and outcomes");
+        Console.WriteLine("  --diagnose-mutation-distribution check sparse mutation frequencies and dimensions");
         Console.WriteLine("  --experiment-adaptation run three bounded natural-lineage paired assays");
         Console.WriteLine("  --experiment-supplement run one fixed finite-resource common-garden supplement");
         Console.WriteLine("  --inspect-lineage <int>  print recent parent-child genome/body differences");

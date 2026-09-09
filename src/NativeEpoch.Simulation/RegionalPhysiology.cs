@@ -81,7 +81,8 @@ public static class RegionalPhysiology
             BodyRegion region=body.GetRegion(geometry.RegionId);
             RegionGene gene=genome.GetRegion(geometry.RegionId);
             double gap=Math.Max(0.0,SubstrateCapacity(region,gene)-region.Substrate);
-            double gate=gene.Permeability*geometry.MatterTransportEfficiency*
+            double expressionGate=EffectiveExchange(region);
+            double gate=gene.Permeability*expressionGate*geometry.MatterTransportEfficiency*
                 (0.30+(0.70*region.TransportAvailability))*
                 (1.0/(1.0+(0.55*genome.Metabolism.OxygenCatalysis)));
             double exposure=Math.Max(0.0,geometry.ExposedSurface);
@@ -187,9 +188,11 @@ public static class RegionalPhysiology
                 double airDryingFactor = waterSide
                     ? 1.0
                     : (0.18 + (0.82 * Math.Clamp(region.Water / waterCapacity, 0.0, 1.0)));
+                double expressionGate=EffectiveExchange(region);
                 double oxygenPermeability = SurfaceTradeoff(
                     gene, genome.Metabolism,
-                    Math.Clamp(region.Water / waterCapacity, 0.0, 1.0)).OxygenPermeability;
+                    Math.Clamp(region.Water / waterCapacity, 0.0, 1.0)).OxygenPermeability*
+                    expressionGate;
                 double oxygenFlux = surface.AreaWeight * oxygenPermeability * mediumCoefficient /
                     Math.Max(geometry.ExchangeDistance, 0.04) *
                     (outsidePotential - oxygenConcentration) * deltaSeconds;
@@ -225,7 +228,7 @@ public static class RegionalPhysiology
                 delta = delta with { Energy = delta.Energy + gainedLight };
                 lightEnergy += gainedLight;
 
-                double matterGate = gene.Permeability * geometry.MatterTransportEfficiency *
+                double matterGate = gene.Permeability * expressionGate * geometry.MatterTransportEfficiency *
                     (0.30 + (0.70 * region.TransportAvailability)) *
                     (1.0 / (1.0 + (0.55 * genome.Metabolism.OxygenCatalysis)));
                 double matterRequest = Math.Max(0.0, substrateCapacity - (region.Substrate + delta.Substrate)) *
@@ -253,7 +256,8 @@ public static class RegionalPhysiology
                 if (waterSide)
                 {
                     double waterRequest = Math.Max(0.0, waterCapacity - (region.Water + delta.Water)) *
-                        gene.Permeability * surface.AreaWeight * 0.12 * deltaSeconds;
+                        gene.Permeability * Math.Clamp(region.ExchangeExpression/0.50,0.0,1.25) *
+                        surface.AreaWeight * 0.12 * deltaSeconds;
                     delta = delta with { Water = delta.Water + waterRequest };
                     waterUptake += waterRequest;
                 }
@@ -262,7 +266,8 @@ public static class RegionalPhysiology
                     double vaporDeficit = 1.0 - surfaceEnvironment.Moisture;
                     double evaporated = Math.Min(
                         Math.Max(0.0, region.Water + delta.Water),
-                        surface.AreaWeight * gene.Permeability * barrier * vaporDeficit * 0.025 * deltaSeconds);
+                        surface.AreaWeight * gene.Permeability * barrier *
+                        (1.0-0.82*region.BarrierExpression) * vaporDeficit * 0.025 * deltaSeconds);
                     delta = delta with { Water = delta.Water - evaporated };
                     waterLost += evaporated;
                 }
@@ -278,6 +283,10 @@ public static class RegionalPhysiology
             matterReservation.HasValue?matterDemand:rawSubstrateDemand, waterUptake, waterLost,
             lightEnergy, assimilationEnergy, waterArea, airArea, exposedSamples, occludedSamples);
     }
+
+    private static double EffectiveExchange(BodyRegion region) =>
+        Math.Clamp(region.ExchangeExpression/0.50,0.0,1.25)*
+        (1.0-0.30*region.BarrierExpression);
 
     public static RegionalTransportResult TransportAlongMatterEdges(
         DevelopingBody body,
@@ -452,7 +461,10 @@ public static class RegionalPhysiology
             BodyRegion updated = body.GetRegion(snapshot.RegionId);
             double maintenance = ((config.BaseMaintenanceEnergyPerSecond *
                     updated.Matter / Math.Max(0.05, body.Cache.TotalMatter)) +
-                (updated.Matter * (0.02 + (0.025 * gene.SignalConductivity)))) * deltaSeconds;
+                (updated.Matter * (0.02 + (0.025 * gene.SignalConductivity) +
+                    0.018*(updated.ExchangeExpression+updated.BarrierExpression+
+                        updated.ContractileExpression+updated.StructuralExpression+
+                        updated.SensoryExpression)))) * deltaSeconds;
             double paid = Math.Min(updated.Energy, maintenance);
             body.ApplyInventoryDelta(updated.RegionId, new RegionalInventoryDelta(0.0, 0.0, 0.0, -paid));
             maintenancePaid += paid;

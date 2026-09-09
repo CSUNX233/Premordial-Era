@@ -129,11 +129,12 @@ public static class AdaptationExperiment
 
     private static (Genome Genome,string Kind) RevertOneChange(Genome candidate,Genome ancestor)
     {
-        if(!candidate.Metabolism.Equals(ancestor.Metabolism))return(new Genome(candidate.Regions,candidate.MutationRate,ancestor.Metabolism,candidate.ControllerNodes),"metabolism");
-        if(!candidate.ControllerNodes.SequenceEqual(ancestor.ControllerNodes))return(new Genome(candidate.Regions,candidate.MutationRate,candidate.Metabolism,ancestor.ControllerNodes),"controller");
+        if(!candidate.Metabolism.Equals(ancestor.Metabolism))return(new Genome(candidate.Regions,candidate.MutationRate,ancestor.Metabolism,candidate.ControllerNodes,candidate.Sensors),"metabolism");
+        if(!candidate.ControllerNodes.SequenceEqual(ancestor.ControllerNodes))return(new Genome(candidate.Regions,candidate.MutationRate,candidate.Metabolism,ancestor.ControllerNodes,candidate.Sensors),"controller");
+        if(!candidate.Sensors.SequenceEqual(ancestor.Sensors))return(new Genome(candidate.Regions,candidate.MutationRate,candidate.Metabolism,candidate.ControllerNodes,ancestor.Sensors),"sensors");
         if(candidate.Regions.Count==ancestor.Regions.Count&&candidate.Regions.Select(r=>r.RegionId).SequenceEqual(ancestor.Regions.Select(r=>r.RegionId)))
         {RegionGene[] regions=candidate.Regions.ToArray();for(int i=0;i<regions.Length;i++)if(!regions[i].Equals(ancestor.Regions[i]))
-            {int id=regions[i].RegionId;regions[i]=ancestor.Regions[i];return(new Genome(regions,candidate.MutationRate,candidate.Metabolism,candidate.ControllerNodes),$"region_{id}");}}
+            {int id=regions[i].RegionId;regions[i]=ancestor.Regions[i];return(new Genome(regions,candidate.MutationRate,candidate.Metabolism,candidate.ControllerNodes,candidate.Sensors),$"region_{id}");}}
         return(ancestor,"full_topology_ancestor_control");
     }
 }

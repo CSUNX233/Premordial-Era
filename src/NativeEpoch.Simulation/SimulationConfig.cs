@@ -11,6 +11,8 @@ public sealed record SimulationConfig
     // Optional preset: changing founder count transfers matter from the same
     // initial environment budget, rather than adding ecosystem resources.
     public int? ResourceBudgetReferenceAncestors { get; init; }
+    public bool RandomizeFounders { get; init; } = true;
+    public CorePrecisionProfile PrecisionProfile { get; init; } = CorePrecisionProfile.Balanced;
 
     public double CoreInitialMatter { get; init; } = 0.25;
     public double AncestorStoredMatter { get; init; } = 1.5;
@@ -69,6 +71,7 @@ public sealed record SimulationConfig
     public double MetabolicSubstratePerSecond { get; init; } = 0.022;
     public double ControllerNodeEnergyPerSecond { get; init; } = 0.003;
     public double ControllerActivationEnergyPerSecond { get; init; } = 0.025;
+    public double SensorEnergyPerSlotPerSecond { get; init; } = 0.004;
     public double LocalActuationEnergyScale { get; init; } = 0.18;
     public double SecretionMatterPerSecond { get; init; } = 0.006;
     public double SecretionEnergyPerMatter { get; init; } = 0.8;
@@ -84,6 +87,7 @@ public sealed record SimulationConfig
 
     public void Validate(int ancestorCount)
     {
+        PrecisionProfile.Validate();
         if (!float.IsFinite(WorldSize) || WorldSize <= 0f)
             throw new ArgumentOutOfRangeException(nameof(WorldSize));
         if (EnvironmentGridSize < 2)
@@ -133,7 +137,8 @@ public sealed record SimulationConfig
             WaterOxygenTransferCoefficient, AirOxygenTransferCoefficient,
             OxygenPerAerobicSubstrate, AerobicEnergyPerSubstrate, AnaerobicEnergyPerSubstrate,
             MetabolicSubstratePerSecond, ControllerNodeEnergyPerSecond,
-            ControllerActivationEnergyPerSecond, LocalActuationEnergyScale, SecretionMatterPerSecond,
+            ControllerActivationEnergyPerSecond, SensorEnergyPerSlotPerSecond,
+            LocalActuationEnergyScale, SecretionMatterPerSecond,
             SecretionEnergyPerMatter, VerticalContractionAcceleration,
             BuoyancyAccelerationScale, WaterVerticalDampingPerSecond, LandFrictionMultiplier,
             DryingRatePerSecond, RehydrationRatePerSecond, DehydrationEnergyCostPerSecond,

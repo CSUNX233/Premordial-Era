@@ -45,6 +45,8 @@ public readonly record struct OrganismPresentationState(
     IReadOnlyList<BodyRegion> RegionInventories)
 {
     public int Generation { get; init; }
+    public int BirthMutationCount { get; init; }
+    public double OffspringMutationProbability { get; init; }
     public double ExplorationDrive { get; init; }
     public double ForagingTrend { get; init; }
     public int ContactNeighborCount { get; init; }
@@ -54,6 +56,24 @@ public readonly record struct OrganismPresentationState(
     public Vector2 InteractionDirection { get; init; }
     public double ResourceSatisfaction { get; init; }
     public double ResourceDemandLastStep { get; init; }
+    public double MeanTissueExpression { get; init; }
+    public int ActiveSensorCount { get; init; }
+    public double ChemicalSensorSignal { get; init; }
+    public double ContactSensorSignal { get; init; }
+    public double SensingEnergyLastStep { get; init; }
+    public int ActiveVisualSensorCount { get; init; }
+    public double VisionSignal { get; init; }
+    public double BodyCenterElevation { get; init; } = double.NaN;
+    public IReadOnlyList<AppendageRegionPose> AppendageRegions { get; init; } = Array.Empty<AppendageRegionPose>();
+    public int AppendageContactCount { get; init; }
+    public double AppendageSupport { get; init; }
+    public Vector2 AppendageGroundVelocity { get; init; }
+    public double AppendageEnergyLastStep { get; init; }
+    public double CavityOxygen { get; init; }
+    public double CavityOxygenCapacity { get; init; }
+    public double CavityVentilationLastStep { get; init; }
+    public double CavityTissueOxygenLastStep { get; init; }
+    public double CavityEnergyLastStep { get; init; }
 }
 
 public sealed class WorldPresentationSnapshot

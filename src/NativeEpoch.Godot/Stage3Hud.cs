@@ -25,6 +25,7 @@ public sealed partial class Stage3Hud : CanvasLayer
     public event Action? HeatmapRequested;
     public event Action? MediumDiagnosticRequested;
     public event Action? MorphologyLabRequested;
+    public event Action? FunctionCatalogueRequested;
 
     public override void _Ready()
     {
@@ -105,6 +106,7 @@ public sealed partial class Stage3Hud : CanvasLayer
         controls.AddThemeConstantOverride("v_separation", 5);
         root.AddChild(controls);
         _pause = AddButton(controls, "暂停", "暂停或继续固定步模拟", () => PauseRequested?.Invoke());
+        AddButton(controls, "功能图鉴（G）", "查看、收藏与定位已观察到的功能", () => FunctionCatalogueRequested?.Invoke());
         AddButton(controls, "单步", "只执行一个 0.1 秒模拟步", () => StepRequested?.Invoke());
         AddButton(controls, "1×", "正常倍率，固定步仍为 0.1 秒", () => SpeedRequested?.Invoke(1));
         AddButton(controls, "10×", "每秒目标执行 100 个固定步", () => SpeedRequested?.Invoke(10));

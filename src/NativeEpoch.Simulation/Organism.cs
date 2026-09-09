@@ -8,6 +8,7 @@ public struct Organism
     public ulong ParentId;
     public int Generation;
     public int GenomeId;
+    public int BirthMutationCount;
     public Vector2 Position;
     public Vector2 Velocity;
     public float Depth;
@@ -33,6 +34,15 @@ public struct Organism
     public double ResourceDemandLastStep;
     public double ResourceSatisfaction;
     public double[] ControllerState;
+    public double[] SensorState;
+    public double[] TissueControllerInputs;
+    public int ActiveSensorCount;
+    public double ChemicalSensorSignal;
+    public double ContactSensorSignal;
+    public int ActiveVisualSensorCount;
+    public double VisionSignal;
+    public double ChemicalSenseAccess;
+    public double SensingEnergyLastStep;
     public ForagingMemory ForagingMemory;
     public ControllerInputs ControllerInputs;
     public ControllerOutputs ControllerOutputs;
@@ -47,6 +57,16 @@ public struct Organism
     public double ReproductionCooldownSeconds;
     public DevelopingBody Body;
     public BodyPose Pose;
+    public AppendageMechanics AppendageMechanics;
+    public IReadOnlyList<AppendageRegionPose> AppendageRegions;
+    public int AppendageContactCount;
+    public double AppendageSupport;
+    public Vector2 AppendageGroundVelocity;
+    public double AppendageEnergyLastStep;
+    public CavitySystemState CavityState;
+    public double CavityVentilationLastStep;
+    public double CavityTissueOxygenLastStep;
+    public double CavityEnergyLastStep;
 
     public readonly bool AllFinite =>
         float.IsFinite(Position.X) &&
@@ -73,6 +93,13 @@ public struct Organism
         double.IsFinite(ResourceDemandLastStep)&&ResourceDemandLastStep>=0.0&&
         double.IsFinite(ResourceSatisfaction)&&ResourceSatisfaction is >=0.0 and <=1.0&&
         ControllerState is not null && ControllerState.All(double.IsFinite) &&
+        SensorState is not null && SensorState.All(double.IsFinite) &&
+        TissueControllerInputs is not null && TissueControllerInputs.All(double.IsFinite) &&
+        ActiveSensorCount>=0 && double.IsFinite(ChemicalSensorSignal) &&
+        double.IsFinite(ContactSensorSignal) && ActiveVisualSensorCount>=0 &&
+        double.IsFinite(VisionSignal) && double.IsFinite(ChemicalSenseAccess) &&
+        ChemicalSenseAccess is >=0.0 and <=1.0 &&
+        double.IsFinite(SensingEnergyLastStep) && SensingEnergyLastStep>=0.0 &&
         ForagingMemory is not null && ForagingMemory.AllFinite &&
         ControllerInputs.AllFinite &&
         ControllerOutputs.AllFinite &&
@@ -84,5 +111,13 @@ public struct Organism
         double.IsFinite(Maturity) &&
         double.IsFinite(ReproductionCooldownSeconds) &&
         Maturity is >= 0.0 and <= 1.0 &&
-        Body is not null && Pose is not null;
+        Body is not null && Pose is not null && AppendageMechanics is not null &&
+        AppendageRegions is not null && AppendageRegions.All(region=>region.AllFinite) &&
+        AppendageContactCount>=0 && double.IsFinite(AppendageSupport) &&
+        AppendageSupport is >=0.0 and <=1.0 &&
+        float.IsFinite(AppendageGroundVelocity.X)&&float.IsFinite(AppendageGroundVelocity.Y)&&
+        double.IsFinite(AppendageEnergyLastStep)&&AppendageEnergyLastStep>=0.0&&
+        CavityState is not null&&CavityState.AllFinite&&
+        double.IsFinite(CavityVentilationLastStep)&&double.IsFinite(CavityTissueOxygenLastStep)&&
+        double.IsFinite(CavityEnergyLastStep)&&CavityEnergyLastStep>=0.0;
 }

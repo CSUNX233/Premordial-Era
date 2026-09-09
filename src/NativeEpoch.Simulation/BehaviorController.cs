@@ -187,7 +187,8 @@ public static class BehaviorController
     public static ControllerEvaluation Evaluate(
         Genome genome,
         IReadOnlyList<double>? previousState,
-        ControllerInputs inputs)
+        ControllerInputs inputs,
+        IReadOnlyList<double>? tissueNodeInputs = null)
     {
         if (!inputs.AllFinite)
             throw new ArgumentOutOfRangeException(nameof(inputs));
@@ -225,7 +226,9 @@ public static class BehaviorController
                 (inputs.Novelty * 0.35 * Math.Abs(node.RecurrentWeight)) -
                 (inputs.Danger * 0.45 * Math.Abs(node.PressureWeight)) +
                 (inputs.ExplorationSignal * 0.25 * node.LateralContractionOutputWeight) +
-                (oldState[index] * node.SelfMemoryWeight) + recurrent;
+                (oldState[index] * node.SelfMemoryWeight) + recurrent +
+                Math.Clamp(tissueNodeInputs is not null && index<tissueNodeInputs.Count
+                    ? tissueNodeInputs[index] : 0.0,-3.0,3.0);
             double state = Math.Tanh(sum);
             nextState[index] = state;
             contraction += state * node.ContractionOutputWeight;

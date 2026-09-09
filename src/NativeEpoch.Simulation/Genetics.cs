@@ -11,7 +11,38 @@ public enum MutationKind
     ControllerPoint,
     ControllerAddNode,
     ControllerDeleteNode,
-    ControllerReconnect
+    ControllerReconnect,
+    SensorPoint,
+    SensorReconnect
+}
+
+// These are bounded local physical/chemical signals, not organs or behaviours.
+// Directional image/light sampling is deliberately absent from this phase.
+public enum SensorChannel
+{
+    ChemicalResource,
+    ContactPressure,
+    InternalEnergy,
+    Hydration,
+    AmbientLight,
+    Temperature,
+    Pressure,
+    DirectionalLight
+}
+
+public readonly record struct SensorGene(
+    SensorChannel Channel,
+    int SourceRegionId,
+    int TargetControllerNodeIndex,
+    double Gain,
+    double ResponseRate,
+    double DirectionOffsetRadians = 0.0,
+    double Range = 2.0,
+    double DirectionalSelectivity = 0.5)
+{
+    public bool AllFinite => double.IsFinite(Gain) && double.IsFinite(ResponseRate) &&
+        double.IsFinite(DirectionOffsetRadians) && double.IsFinite(Range) &&
+        double.IsFinite(DirectionalSelectivity);
 }
 
 public readonly record struct MetabolicGene(
@@ -88,7 +119,16 @@ public readonly record struct RegionGene(
     double Contractility,
     double SignalConductivity,
     double StorageFraction,
-    double Pigment)
+    double Pigment,
+    double ExchangeExpression = 0.5,
+    double BarrierExpression = 0.3,
+    double ContractileExpression = 0.5,
+    double StructuralExpression = 0.5,
+    double SensoryExpression = 0.3,
+    double CavityFraction = 0.0,
+    double CavityAperture = 0.0,
+    double JointRestPitch = 0.0,
+    double JointMobility = 0.0)
 {
     public bool AllFinite =>
         double.IsFinite(AppearanceMaturity) &&
@@ -108,7 +148,14 @@ public readonly record struct RegionGene(
         double.IsFinite(Contractility) &&
         double.IsFinite(SignalConductivity) &&
         double.IsFinite(StorageFraction) &&
-        double.IsFinite(Pigment);
+        double.IsFinite(Pigment) &&
+        double.IsFinite(ExchangeExpression) &&
+        double.IsFinite(BarrierExpression) &&
+        double.IsFinite(ContractileExpression) &&
+        double.IsFinite(StructuralExpression) &&
+        double.IsFinite(SensoryExpression) && double.IsFinite(CavityFraction) &&
+        double.IsFinite(CavityAperture) && double.IsFinite(JointRestPitch) &&
+        double.IsFinite(JointMobility);
 }
 
 public sealed class Genome
@@ -117,17 +164,22 @@ public sealed class Genome
     private readonly IReadOnlyList<RegionGene> _readOnlyRegions;
     private readonly ControllerNodeGene[] _controllerNodes;
     private readonly IReadOnlyList<ControllerNodeGene> _readOnlyControllerNodes;
+    private readonly SensorGene[] _sensors;
+    private readonly IReadOnlyList<SensorGene> _readOnlySensors;
 
     public Genome(
         IEnumerable<RegionGene> regions,
         double mutationRate,
         MetabolicGene? metabolism = null,
-        IEnumerable<ControllerNodeGene>? controllerNodes = null)
+        IEnumerable<ControllerNodeGene>? controllerNodes = null,
+        IEnumerable<SensorGene>? sensors = null)
     {
         _regions = regions.ToArray();
         _readOnlyRegions = Array.AsReadOnly(_regions);
         _controllerNodes = (controllerNodes ?? []).ToArray();
         _readOnlyControllerNodes = Array.AsReadOnly(_controllerNodes);
+        _sensors = (sensors ?? []).ToArray();
+        _readOnlySensors = Array.AsReadOnly(_sensors);
         MutationRate = mutationRate;
         Metabolism = metabolism ?? MetabolicGene.AquaticAncestor;
         GenomeValidator.Validate(this);
@@ -138,6 +190,7 @@ public sealed class Genome
     public double MutationRate { get; }
     public MetabolicGene Metabolism { get; }
     public IReadOnlyList<ControllerNodeGene> ControllerNodes => _readOnlyControllerNodes;
+    public IReadOnlyList<SensorGene> Sensors => _readOnlySensors;
     public ulong Fingerprint { get; }
 
     public RegionGene GetRegion(int regionId)
@@ -154,17 +207,20 @@ public sealed class Genome
             0, -1, -1, -1, true,
             0.0, 0.80, 0.65, 0.0, 0.88, 0.10, 0.06, 0.88,
             0.65, 0.50, 0.60, 0.35, 0.55,
-            0.25, 0.20, 0.50, 0.55, 0.45),
+            0.25, 0.20, 0.50, 0.55, 0.45,
+            0.62, 0.32, 0.58, 0.48, 0.55),
         new RegionGene(
             1, 0, 0, 0, false,
             0.20, 1.10, 0.35, -0.60, 0.72, 0.34, -0.18, 0.72,
             0.40, 0.30, 0.40, 0.75, 0.80,
-            0.35, 0.25, 0.45, 0.30, 0.25),
+            0.35, 0.25, 0.45, 0.30, 0.25,
+            0.78, 0.18, 0.66, 0.24, 0.72),
         new RegionGene(
             2, 0, 0, 0, false,
             0.45, 0.70, 0.50, 0.80, 0.48, 0.22, 0.24, 0.80,
             0.55, 0.65, 0.70, 0.45, 0.40,
-            0.75, 0.35, 0.60, 0.65, 0.65)
+            0.75, 0.35, 0.60, 0.65, 0.65,
+            0.48, 0.55, 0.42, 0.72, 0.46)
     ],
     mutationRate: 0.28,
     metabolism: MetabolicGene.AquaticAncestor,
@@ -179,13 +235,21 @@ public sealed class Genome
         new ControllerNodeGene(
             -0.02, 0.15, -0.20, 0.65, 0.15, -0.15, -0.45, 0.35,
             0.30, 1, -0.72, 0.40, -0.12, 0.62, 0.35, 0.55)
+    ],
+    sensors:
+    [
+        new SensorGene(SensorChannel.ChemicalResource, 1, 0, 1.00, 2.2),
+        new SensorGene(SensorChannel.ContactPressure, 0, 1, 0.85, 4.0),
+        new SensorGene(SensorChannel.InternalEnergy, 0, 2, 0.70, 1.4),
+        new SensorGene(SensorChannel.Hydration, 2, 1, 0.55, 1.8)
     ]);
 
     internal bool ContentEquals(Genome other) =>
         MutationRate.Equals(other.MutationRate) &&
         Metabolism.Equals(other.Metabolism) &&
         _regions.SequenceEqual(other._regions) &&
-        _controllerNodes.SequenceEqual(other._controllerNodes);
+        _controllerNodes.SequenceEqual(other._controllerNodes) &&
+        _sensors.SequenceEqual(other._sensors);
 
     private ulong ComputeFingerprint()
     {
@@ -220,6 +284,28 @@ public sealed class Genome
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.SignalConductivity)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.StorageFraction)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.Pigment)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.ExchangeExpression)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.BarrierExpression)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.ContractileExpression)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.StructuralExpression)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.SensoryExpression)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.CavityFraction)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.CavityAperture)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.JointRestPitch)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.JointMobility)));
+        }
+
+        FingerprintHash.Add(ref hash, unchecked((ulong)_sensors.Length));
+        foreach (SensorGene sensor in _sensors)
+        {
+            FingerprintHash.Add(ref hash, unchecked((ulong)sensor.Channel));
+            FingerprintHash.Add(ref hash, unchecked((ulong)sensor.SourceRegionId));
+            FingerprintHash.Add(ref hash, unchecked((ulong)sensor.TargetControllerNodeIndex));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(sensor.Gain)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(sensor.ResponseRate)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(sensor.DirectionOffsetRadians)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(sensor.Range)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(sensor.DirectionalSelectivity)));
         }
 
         FingerprintHash.Add(ref hash, unchecked((ulong)_controllerNodes.Length));
@@ -246,6 +332,7 @@ public static class GenomeValidator
 {
     public const int MaximumRegions = 32;
     public const int MaximumControllerNodes = 12;
+    public const int MaximumSensors = 8;
 
     public static void Validate(Genome genome)
     {
@@ -284,6 +371,20 @@ public static class GenomeValidator
             ];
             if (weights.Any(value => value is < -3.0 or > 3.0))
                 throw new InvalidOperationException($"Controller node {index} has a weight outside -3 to 3.");
+        }
+
+        if (genome.Sensors.Count > MaximumSensors)
+            throw new InvalidOperationException($"A genome may contain 0-{MaximumSensors} sensor slots.");
+        foreach (SensorGene sensor in genome.Sensors)
+        {
+            if (!Enum.IsDefined(sensor.Channel) || !sensor.AllFinite ||
+                sensor.Gain is < -3.0 or > 3.0 || sensor.ResponseRate is < 0.1 or > 8.0 ||
+                sensor.DirectionOffsetRadians < -Math.PI || sensor.DirectionOffsetRadians > Math.PI ||
+                sensor.Range is < 0.25 or > 12.0 || sensor.DirectionalSelectivity is < 0.0 or > 1.0 ||
+                !genome.Regions.Any(region => region.RegionId == sensor.SourceRegionId) ||
+                sensor.TargetControllerNodeIndex < 0 ||
+                sensor.TargetControllerNodeIndex >= genome.ControllerNodes.Count)
+                throw new InvalidOperationException("A sensor slot has an invalid channel, source, target, gain, or rate.");
         }
 
         HashSet<int> ids = [];
@@ -333,9 +434,14 @@ public static class GenomeValidator
             region.Density, region.Rigidity, region.Toughness, region.Permeability,
             region.LightReactivity, region.CatalyticActivity, region.Contractility,
             region.SignalConductivity, region.StorageFraction, region.Pigment
+            , region.ExchangeExpression, region.BarrierExpression, region.ContractileExpression,
+            region.StructuralExpression, region.SensoryExpression, region.CavityFraction,
+            region.CavityAperture, region.JointMobility
         ];
         if (materialValues.Any(value => value is < 0.0 or > 1.0))
             throw new InvalidOperationException($"Region {region.RegionId} has a material value outside 0-1.");
+        if (region.JointRestPitch is < -1.0 or > 1.0)
+            throw new InvalidOperationException($"Region {region.RegionId} has joint rest pitch outside -1 to 1.");
     }
 
     private static void ValidateReference(HashSet<int> ids, int source, int target, string kind)
@@ -402,56 +508,102 @@ public sealed class GenomeRegistry
             : throw new ArgumentOutOfRangeException(nameof(genomeId));
 }
 
-public readonly record struct MutationResult(Genome Genome, MutationKind Kind, string Summary);
+public readonly record struct MutationResult
+{
+    public MutationResult(Genome genome, MutationKind kind, string summary)
+        : this(genome, kind, summary, kind == MutationKind.None ? 0 : 1,
+            kind == MutationKind.None ? Array.Empty<MutationKind>() : new[] { kind })
+    {
+    }
+
+    public MutationResult(
+        Genome genome,
+        MutationKind kind,
+        string summary,
+        int eventCount,
+        IReadOnlyList<MutationKind>? eventKinds)
+    {
+        if (eventCount < 0) throw new ArgumentOutOfRangeException(nameof(eventCount));
+        Genome = genome;
+        Kind = kind;
+        Summary = summary;
+        _eventKinds = eventKinds?.ToArray() ?? Array.Empty<MutationKind>();
+        if (EventKinds.Count != eventCount)
+            throw new ArgumentException("Mutation event metadata count must match its kind list.", nameof(eventKinds));
+        EventCount = eventCount;
+    }
+
+    public Genome Genome { get; }
+    public MutationKind Kind { get; }
+    public string Summary { get; }
+    public int EventCount { get; }
+    private readonly IReadOnlyList<MutationKind>? _eventKinds;
+    public IReadOnlyList<MutationKind> EventKinds => _eventKinds ?? Array.Empty<MutationKind>();
+}
 
 public sealed class GenomeMutator
 {
+    public static double NaturalMutationProbability(double mutationRate)
+    {
+        if (!double.IsFinite(mutationRate) || mutationRate is < 0.0 or > 0.5)
+            throw new ArgumentOutOfRangeException(nameof(mutationRate));
+        if (mutationRate == 0.0) return 0.0;
+        double oldProbability = 1.0 - ((1.0 - mutationRate) * (1.0 - (0.55 * mutationRate)));
+        return Math.Min(0.95, oldProbability + 0.05);
+    }
+
     public MutationResult Inherit(
         Genome parent,
         DeterministicRandom bodyRandom,
         DeterministicRandom controllerRandom)
     {
-        bool mutateBody = bodyRandom.NextUnitDouble() < parent.MutationRate;
-        bool mutateController = controllerRandom.NextUnitDouble() < parent.MutationRate * 0.55;
-        if (!mutateBody && !mutateController)
+        double mutationProbability = NaturalMutationProbability(parent.MutationRate);
+        if (bodyRandom.NextUnitDouble() >= mutationProbability)
             return new MutationResult(parent, MutationKind.None, "exact inheritance");
 
+        double countChoice = bodyRandom.NextUnitDouble();
+        int requestedEvents = countChoice < 0.90 ? 1 : countChoice < 0.99 ? 2 : 3;
         Genome result = parent;
-        MutationKind kind = MutationKind.None;
-        List<string> summaries = [];
-        if (mutateBody)
+        List<MutationKind> eventKinds = new(requestedEvents);
+        List<string> summaries = new(requestedEvents);
+        for (int eventIndex = 0; eventIndex < requestedEvents; eventIndex++)
         {
             double choice = bodyRandom.NextUnitDouble();
-            kind = choice switch
+            MutationKind selectedKind = choice switch
             {
-                < 0.58 => MutationKind.Point,
-                < 0.68 => MutationKind.MetabolicPoint,
-                < 0.79 => MutationKind.DuplicateRegion,
+                < 0.55 => MutationKind.Point,
+                < 0.65 => MutationKind.MetabolicPoint,
+                < 0.80 => MutationKind.ControllerPoint,
+                < 0.85 => MutationKind.SensorPoint,
+                < 0.88 => MutationKind.DuplicateRegion,
                 < 0.90 => MutationKind.DeleteRegion,
-                _ => MutationKind.ReconnectRegion
+                < 0.93 => MutationKind.ReconnectRegion,
+                < 0.945 => MutationKind.ControllerAddNode,
+                < 0.955 => MutationKind.ControllerDeleteNode,
+                < 0.970 => MutationKind.ControllerReconnect,
+                _ => MutationKind.SensorReconnect
             };
-            MutationResult bodyResult = MutateForced(result, bodyRandom, kind);
-            result = bodyResult.Genome;
-            summaries.Add(bodyResult.Summary);
-        }
-
-        if (mutateController)
-        {
-            double choice = controllerRandom.NextUnitDouble();
-            MutationKind controllerKind = choice switch
+            MutationResult eventResult = selectedKind switch
             {
-                < 0.70 => MutationKind.ControllerPoint,
-                < 0.82 => MutationKind.ControllerAddNode,
-                < 0.92 => MutationKind.ControllerDeleteNode,
-                _ => MutationKind.ControllerReconnect
+                MutationKind.ControllerPoint or MutationKind.ControllerAddNode or
+                    MutationKind.ControllerDeleteNode or MutationKind.ControllerReconnect =>
+                    MutateControllerForced(result, controllerRandom, selectedKind),
+                MutationKind.SensorPoint or MutationKind.SensorReconnect =>
+                    MutateSensorForced(result, controllerRandom, selectedKind),
+                _ => MutateForced(result, bodyRandom, selectedKind)
             };
-            MutationResult controllerResult = MutateControllerForced(result, controllerRandom, controllerKind);
-            result = controllerResult.Genome;
-            kind = controllerKind;
-            summaries.Add(controllerResult.Summary);
+            if (eventResult.Genome.Fingerprint == result.Fingerprint)
+                continue;
+            result = eventResult.Genome;
+            eventKinds.Add(eventResult.Kind);
+            summaries.Add(eventResult.Summary);
         }
 
-        return new MutationResult(result, kind, string.Join("; ", summaries));
+        if (eventKinds.Count == 0 || result.Fingerprint == parent.Fingerprint)
+            return new MutationResult(parent, MutationKind.None, "exact inheritance; attempted changes had no effect");
+        MutationKind kind = eventKinds[^1];
+        return new MutationResult(result, kind, string.Join("; ", summaries),
+            eventKinds.Count, eventKinds.ToArray());
     }
 
     public MutationResult MutateForced(Genome parent, DeterministicRandom random, MutationKind kind)
@@ -460,6 +612,7 @@ public sealed class GenomeMutator
             return new MutationResult(parent, MutationKind.None, "exact inheritance");
 
         List<RegionGene> regions = parent.Regions.ToList();
+        List<SensorGene> sensors = parent.Sensors.ToList();
         MetabolicGene metabolism = parent.Metabolism;
         string summary;
         switch (kind)
@@ -471,10 +624,16 @@ public sealed class GenomeMutator
                 summary = DuplicateRegion(regions, random);
                 break;
             case MutationKind.DeleteRegion when regions.Count > 1:
-                summary = DeleteRegion(regions, random);
+                summary = DeleteRegion(regions, sensors, random);
                 break;
             case MutationKind.ReconnectRegion when regions.Count > 2:
-                summary = ReconnectRegion(regions, random);
+                string? reconnect = ReconnectRegion(regions, random);
+                if (reconnect is null)
+                {
+                    kind = MutationKind.Point;
+                    summary = PointMutation(regions, random) + " (no safe alternate connection)";
+                }
+                else summary = reconnect;
                 break;
             case MutationKind.MetabolicPoint:
                 (metabolism, summary) = MutateMetabolism(metabolism, random);
@@ -486,7 +645,9 @@ public sealed class GenomeMutator
         }
 
         double mutationRate = parent.MutationRate;
-        Genome child = new(regions, mutationRate, metabolism, parent.ControllerNodes);
+        Genome child = new(regions, mutationRate, metabolism, parent.ControllerNodes, sensors);
+        if (child.Fingerprint == parent.Fingerprint)
+            return new MutationResult(parent, MutationKind.None, "attempted body mutation had no effect");
         return new MutationResult(child, kind, summary);
     }
 
@@ -496,6 +657,7 @@ public sealed class GenomeMutator
         MutationKind kind)
     {
         List<ControllerNodeGene> nodes = parent.ControllerNodes.ToList();
+        List<SensorGene> sensors = parent.Sensors.ToList();
         string summary;
         switch (kind)
         {
@@ -506,7 +668,7 @@ public sealed class GenomeMutator
                 summary = AddControllerNode(nodes, random);
                 break;
             case MutationKind.ControllerDeleteNode when nodes.Count > 0:
-                summary = DeleteControllerNode(nodes, random);
+                summary = DeleteControllerNode(nodes, sensors, random);
                 break;
             case MutationKind.ControllerReconnect when nodes.Count > 1:
                 summary = ReconnectControllerNode(nodes, random);
@@ -519,7 +681,79 @@ public sealed class GenomeMutator
                 break;
         }
 
-        Genome child = new(parent.Regions, parent.MutationRate, parent.Metabolism, nodes);
+        Genome child = new(parent.Regions, parent.MutationRate, parent.Metabolism, nodes, sensors);
+        if (child.Fingerprint == parent.Fingerprint)
+            return new MutationResult(parent, MutationKind.None, "attempted controller mutation had no effect");
+        return new MutationResult(child, kind, summary);
+    }
+
+    public MutationResult MutateSensorForced(Genome parent, DeterministicRandom random, MutationKind kind)
+    {
+        List<SensorGene> sensors = parent.Sensors.ToList();
+        string summary;
+        if (sensors.Count == 0)
+        {
+            if (parent.ControllerNodes.Count == 0)
+                return new MutationResult(parent, MutationKind.None, "sensor mutation unavailable without controller nodes");
+            RegionGene source = parent.Regions[random.NextInt(parent.Regions.Count)];
+            sensors.Add(new SensorGene((SensorChannel)random.NextInt(Enum.GetValues<SensorChannel>().Length), source.RegionId,
+                random.NextInt(parent.ControllerNodes.Count), 0.25 + random.NextUnitDouble(),
+                0.5 + (3.0 * random.NextUnitDouble())));
+            summary = "sensor slot 0 added";
+            kind = MutationKind.SensorReconnect;
+        }
+        else if (kind == MutationKind.SensorReconnect)
+        {
+            int index = random.NextInt(sensors.Count);
+            SensorGene old = sensors[index];
+            int choice = random.NextInt(3);
+            if (choice == 0 && parent.Regions.Count > 1)
+            {
+                RegionGene[] alternatives = parent.Regions
+                    .Where(region => region.RegionId != old.SourceRegionId).ToArray();
+                int source = alternatives[random.NextInt(alternatives.Length)].RegionId;
+                sensors[index] = old with { SourceRegionId = source };
+                summary = $"sensor {index} source region {old.SourceRegionId}->{source}";
+            }
+            else if (choice == 1 && parent.ControllerNodes.Count > 1)
+            {
+                int target = random.NextInt(parent.ControllerNodes.Count - 1);
+                if (target >= old.TargetControllerNodeIndex) target++;
+                sensors[index] = old with { TargetControllerNodeIndex = target };
+                summary = $"sensor {index} target node {old.TargetControllerNodeIndex}->{target}";
+            }
+            else
+            {
+                int channel = random.NextInt(Enum.GetValues<SensorChannel>().Length - 1);
+                if (channel >= (int)old.Channel) channel++;
+                sensors[index] = old with { Channel = (SensorChannel)channel };
+                summary = $"sensor {index} channel {old.Channel}->{sensors[index].Channel}";
+            }
+        }
+        else
+        {
+            int index = random.NextInt(sensors.Count);
+            SensorGene old = sensors[index];
+            int property = random.NextInt(5);
+            MutationStep step = SampleScalarStep(random);
+            sensors[index] = property switch
+            {
+                0 => old with { Gain = ReflectRange(old.Gain + step.SignedFraction, -3.0, 3.0) },
+                1 => old with { ResponseRate = ReflectRange(
+                    old.ResponseRate * Math.Exp(step.SignedFraction), 0.1, 8.0) },
+                2 => old with { DirectionOffsetRadians = ReflectRange(
+                    old.DirectionOffsetRadians + (step.SignedFraction * Math.PI), -Math.PI, Math.PI) },
+                3 => old with { Range = ReflectRange(old.Range * Math.Exp(step.SignedFraction), 0.25, 12.0) },
+                _ => old with { DirectionalSelectivity = ReflectRange(
+                    old.DirectionalSelectivity + step.SignedFraction, 0.0, 1.0) }
+            };
+            summary = $"sensor {index} scalar {property}, {(step.Large ? "rare large" : "small")} inherited step";
+            kind = MutationKind.SensorPoint;
+        }
+        Genome child = new(parent.Regions, parent.MutationRate, parent.Metabolism,
+            parent.ControllerNodes, sensors);
+        if (child.Fingerprint == parent.Fingerprint)
+            return new MutationResult(parent, MutationKind.None, "attempted sensor mutation had no effect");
         return new MutationResult(child, kind, summary);
     }
 
@@ -530,14 +764,12 @@ public sealed class GenomeMutator
         // Keep a morphology budget independent of the number of physiological
         // traits. Mostly local changes, with occasional larger inherited steps;
         // the resulting body still has to pay for its growth and maintenance.
-        int property = random.NextUnitDouble() < 0.65
-            ? random.NextInt(8) : 8 + random.NextInt(10);
-        bool large = random.NextUnitDouble() < 0.15;
-        double sign = random.NextUnitDouble() < 0.5 ? -1.0 : 1.0;
-        double magnitude = random.NextUnitDouble();
-        double delta = sign * (large ? 0.20 + 0.25 * magnitude : 0.025 + 0.10 * magnitude);
-        double sizeFactor = Math.Exp(sign * (large ? 0.30 + 0.35 * magnitude : 0.05 + 0.17 * magnitude));
-        double angleDelta = sign * (large ? 0.45 + 0.55 * magnitude : 0.06 + 0.24 * magnitude);
+        int property = random.NextUnitDouble() < 0.55
+            ? random.NextInt(8) : 8 + random.NextInt(19);
+        MutationStep step = SampleScalarStep(random);
+        double delta = step.SignedFraction;
+        double sizeFactor = Math.Exp(step.SignedFraction);
+        double angleDelta = step.SignedFraction * Math.PI;
         RegionGene changed = property switch
         {
             0 => gene with { TargetLength = ReflectRange(gene.TargetLength * sizeFactor, 0.1, 3.0) },
@@ -557,12 +789,33 @@ public sealed class GenomeMutator
             14 => gene with { Contractility = ReflectRange(gene.Contractility + delta, 0.0, 1.0) },
             15 => gene with { SignalConductivity = ReflectRange(gene.SignalConductivity + delta, 0.0, 1.0) },
             16 => gene with { StorageFraction = ReflectRange(gene.StorageFraction + delta, 0.0, 1.0) },
+            17 => gene with { ExchangeExpression = ReflectRange(gene.ExchangeExpression + delta, 0.0, 1.0) },
+            18 => gene with { BarrierExpression = ReflectRange(gene.BarrierExpression + delta, 0.0, 1.0) },
+            19 => gene with { ContractileExpression = ReflectRange(gene.ContractileExpression + delta, 0.0, 1.0) },
+            20 => gene with { StructuralExpression = ReflectRange(gene.StructuralExpression + delta, 0.0, 1.0) },
+            21 => gene with { SensoryExpression = ReflectRange(gene.SensoryExpression + delta, 0.0, 1.0) },
+            22 => gene with { CavityFraction = ReflectRange(gene.CavityFraction + delta, 0.0, 1.0) },
+            23 => gene with { CavityAperture = ReflectRange(gene.CavityAperture + delta, 0.0, 1.0) },
+            24 => gene with { JointRestPitch = ReflectRange(gene.JointRestPitch + delta, -1.0, 1.0) },
+            25 => gene with { JointMobility = ReflectRange(gene.JointMobility + delta, 0.0, 1.0) },
             _ when !gene.IsCore => gene with { AppearanceMaturity = ReflectRange(gene.AppearanceMaturity + delta, 0.0, 0.95) },
-            _ => gene with { Contractility = ReflectRange(gene.Contractility + delta, 0.0, 1.0) }
+            _ => gene with { SensoryExpression = ReflectRange(gene.SensoryExpression + delta, 0.0, 1.0) }
         };
         regions[index] = changed;
-        return $"region {gene.RegionId} continuous property {property}, {(large ? "large" : "small")} inherited step";
+        return $"region {gene.RegionId} continuous property {property}, {(step.Large ? "rare large" : "small")} inherited step";
     }
+
+    private static MutationStep SampleScalarStep(DeterministicRandom random)
+    {
+        bool large = random.NextUnitDouble() < 0.015;
+        double magnitude = large
+            ? 0.12 + (0.28 * random.NextUnitDouble())
+            : 0.01 + (0.03 * random.NextUnitDouble());
+        double sign = random.NextUnitDouble() < 0.5 ? -1.0 : 1.0;
+        return new MutationStep(large, sign * magnitude);
+    }
+
+    private readonly record struct MutationStep(bool Large, double SignedFraction);
 
     private static double ReflectRange(double value, double minimum, double maximum)
     {
@@ -590,12 +843,15 @@ public sealed class GenomeMutator
         return $"region {source.RegionId} copied to {newId}";
     }
 
-    private static string DeleteRegion(List<RegionGene> regions, DeterministicRandom random)
+    private static string DeleteRegion(List<RegionGene> regions, List<SensorGene> sensors, DeterministicRandom random)
     {
         RegionGene[] removable = regions.Where(region => !region.IsCore).ToArray();
         RegionGene removed = removable[random.NextInt(removable.Length)];
         RegionGene replacement = regions.Single(region => region.RegionId == removed.ParentRegionId);
         regions.RemoveAll(region => region.RegionId == removed.RegionId);
+        for (int index = 0; index < sensors.Count; index++)
+            if (sensors[index].SourceRegionId == removed.RegionId)
+                sensors[index] = sensors[index] with { SourceRegionId = replacement.RegionId };
 
         for (int index = 0; index < regions.Count; index++)
         {
@@ -614,7 +870,7 @@ public sealed class GenomeMutator
         return $"non-core region {removed.RegionId} deleted";
     }
 
-    private static string ReconnectRegion(List<RegionGene> regions, DeterministicRandom random)
+    private static string? ReconnectRegion(List<RegionGene> regions, DeterministicRandom random)
     {
         RegionGene[] nonCore = regions.Where(region => !region.IsCore).ToArray();
         RegionGene source = nonCore[random.NextInt(nonCore.Length)];
@@ -633,7 +889,7 @@ public sealed class GenomeMutator
             .Where(id => id != source.RegionId && id != oldTarget && !descendants.Contains(id))
             .ToArray();
         if (targets.Length == 0)
-            return PointMutation(regions, random) + " (no safe alternate connection)";
+            return null;
 
         int newTarget = targets[random.NextInt(targets.Length)];
         regions[sourceIndex] = graph switch
@@ -674,7 +930,8 @@ public sealed class GenomeMutator
         DeterministicRandom random)
     {
         int property = random.NextInt(4);
-        double delta = (random.NextUnitDouble() - 0.5) * 0.16;
+        MutationStep step = SampleScalarStep(random);
+        double delta = step.SignedFraction;
         MetabolicGene changed = property switch
         {
             0 => gene with { OxygenUseFraction = ClampUnit(gene.OxygenUseFraction + delta) },
@@ -682,7 +939,7 @@ public sealed class GenomeMutator
             2 => gene with { WaterRetention = ClampUnit(gene.WaterRetention + delta) },
             _ => gene with { OsmoticTolerance = ClampUnit(gene.OsmoticTolerance + delta) }
         };
-        return (changed, $"metabolic trade-off {property} changed by {delta:+0.000;-0.000}");
+        return (changed, $"metabolic scalar {property}, {(step.Large ? "rare large" : "small")} step {delta:+0.000;-0.000}");
     }
 
     private static string MutateControllerPoint(
@@ -692,8 +949,9 @@ public sealed class GenomeMutator
         int index = random.NextInt(nodes.Count);
         ControllerNodeGene node = nodes[index];
         int property = random.NextInt(15);
-        double delta = (random.NextUnitDouble() - 0.5) * 0.30;
-        double Adjust(double value) => Math.Clamp(value + delta, -3.0, 3.0);
+        MutationStep step = SampleScalarStep(random);
+        double delta = step.SignedFraction;
+        double Adjust(double value) => ReflectRange(value + delta, -3.0, 3.0);
         nodes[index] = property switch
         {
             0 => node with { Bias = Adjust(node.Bias) },
@@ -712,7 +970,7 @@ public sealed class GenomeMutator
             13 => node with { VerticalContractionOutputWeight = Adjust(node.VerticalContractionOutputWeight) },
             _ => node with { LateralContractionOutputWeight = Adjust(node.LateralContractionOutputWeight) }
         };
-        return $"controller node {index} weight {property} changed by {delta:+0.000;-0.000}";
+        return $"controller node {index} scalar {property}, {(step.Large ? "rare large" : "small")} step {delta:+0.000;-0.000}";
     }
 
     private static string AddControllerNode(
@@ -730,6 +988,7 @@ public sealed class GenomeMutator
 
     private static string DeleteControllerNode(
         List<ControllerNodeGene> nodes,
+        List<SensorGene> sensors,
         DeterministicRandom random)
     {
         int removed = random.NextInt(nodes.Count);
@@ -745,6 +1004,14 @@ public sealed class GenomeMutator
             if (source == index)
                 source = -1;
             nodes[index] = node with { RecurrentSourceIndex = source };
+        }
+        for (int index = sensors.Count - 1; index >= 0; index--)
+        {
+            int target = sensors[index].TargetControllerNodeIndex;
+            if (target == removed)
+                sensors.RemoveAt(index);
+            else if (target > removed)
+                sensors[index] = sensors[index] with { TargetControllerNodeIndex = target - 1 };
         }
         return $"controller node {removed} deleted and connections repaired";
     }

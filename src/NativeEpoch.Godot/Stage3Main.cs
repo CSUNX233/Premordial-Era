@@ -10,10 +10,18 @@ public sealed partial class Stage3Main : Node3D
     private const double FixedDelta = 0.1;
     private const int MaximumStepsPerFrame = 512;
     private SimulationWorld _world = null!;
+    private Task<int>? _simulationBatch;
+    private bool _synchronousDiagnostic;
+    private bool _simulationFaulted;
+    private ObservationTerrain _observationTerrain = null!;
     private WorldPresentationSnapshot _snapshot = null!;
     private LowPolyWorldRenderer _worldRenderer = null!;
     private Stage3Hud _hud = null!;
     private Camera3D _camera = null!;
+    private FunctionCatalogue _catalogue = null!;
+    private FunctionCataloguePanel _cataloguePanel = null!;
+    private bool _pausedBeforeCatalogue;
+    private double _catalogueObserveElapsed, _catalogueSaveElapsed;
     private Vector3 _cameraTarget = Vector3.Zero;
     private float _cameraYaw = -0.55f;
     private float _cameraPitch = -0.82f;
@@ -37,6 +45,7 @@ public sealed partial class Stage3Main : Node3D
 
     public override void _Ready()
     {
+        _synchronousDiagnostic = OS.GetCmdlineUserArgs().Contains("--stage3-profile-sync");
         GetWindow().Title = "原生纪 · 阶段 3 低模世界观察台";
         BuildSceneLighting();
 
@@ -55,6 +64,28 @@ public sealed partial class Stage3Main : Node3D
 
         _hud = new Stage3Hud { Name = "Stage3Hud" };
         AddChild(_hud);
+        bool diagnosticRun = OS.GetCmdlineUserArgs().Any(argument =>
+            argument.StartsWith("--stage3-", StringComparison.Ordinal) ||
+            argument.StartsWith("--capture-", StringComparison.Ordinal));
+        _catalogue = new FunctionCatalogue(!diagnosticRun, !diagnosticRun);
+        _cataloguePanel = new FunctionCataloguePanel { Name = "FunctionCatalogue" };
+        _cataloguePanel.Initialize(_catalogue);
+        _cataloguePanel.CanFocus = CanFocusCatalogueEntry;
+        _cataloguePanel.FocusRequested += entry => SelectAndFocus(entry.RepresentativeId);
+        _hud.AddChild(_cataloguePanel);
+        _cataloguePanel.VisibilityChanged += () =>
+        {
+            if (_cataloguePanel.Visible)
+            {
+                CompleteSimulationBatch(wait: true);
+                _pausedBeforeCatalogue = _paused;
+                _paused = true;
+                _rightDragging = false;
+            }
+            else _paused = _pausedBeforeCatalogue || _simulationFaulted;
+            _hud.SetPaused(_paused);
+            UpdateModeLabel();
+        };
         ConnectHudCommands();
         ResetWorld(24, preRunSteps: 0, "少量祖先 24");
         UpdateCameraTransform();
@@ -66,26 +97,25 @@ public sealed partial class Stage3Main : Node3D
             RunStage2PerformanceProfile(300, 80);
         else if (OS.GetCmdlineUserArgs().Contains("--stage3-smoke"))
             RunHeadlessInteractionSmoke();
+        else if (OS.GetCmdlineUserArgs().Contains("--stage3-worker-smoke"))
+            RunWorkerSmoke();
         else if (OS.GetCmdlineUserArgs().Contains("--capture-stage2-world"))
             CaptureSelectedWorldFrame();
+        else if (OS.GetCmdlineUserArgs().Contains("--capture-function-catalogue"))
+            CaptureFunctionCatalogue();
     }
 
     public override void _Process(double delta)
     {
+        CompleteSimulationBatch(wait: false);
         if (_rightDragging && !Input.IsMouseButtonPressed(MouseButton.Right))
             _rightDragging = false;
-        UpdateCameraMovement(delta);
-        if (!_paused)
+        if (!_cataloguePanel.Visible) UpdateCameraMovement(delta);
+        if (!_paused && !_simulationFaulted)
         {
             _stepAccumulator += delta * _timeScale;
-            int executed = 0;
-            while (_stepAccumulator >= FixedDelta && executed < MaximumStepsPerFrame)
-            {
-                _world.Step();
-                _stepAccumulator -= FixedDelta;
-                executed++;
-            }
-            _rateWindowSteps += executed;
+            // Accumulate at most one second of requested work instead of an unbounded backlog.
+            _stepAccumulator = Math.Min(_stepAccumulator, Math.Max(FixedDelta, _timeScale));
         }
 
         _rateWindowSeconds += delta;
@@ -101,9 +131,11 @@ public sealed partial class Stage3Main : Node3D
         double renderInterval = _timeScale >= 100.0 ? 0.20 : 0.10;
         if (_renderAccumulator >= renderInterval)
         {
-            RefreshSnapshotAndWorld();
-            _renderAccumulator = 0.0;
-            _poseInterpolationElapsed = 0.0;
+            if (RefreshSnapshotAndWorld())
+            {
+                _renderAccumulator = 0.0;
+                _poseInterpolationElapsed = 0.0;
+            }
         }
         _worldRenderer.InterpolateContinuousSkins(
             (float)Math.Clamp(_poseInterpolationElapsed / renderInterval, 0.0, 1.0));
@@ -116,15 +148,78 @@ public sealed partial class Stage3Main : Node3D
         }
 
         _inspectorAccumulator += delta;
+        _catalogueObserveElapsed += delta;
+        _catalogueSaveElapsed += delta;
+        if (_catalogueObserveElapsed >= 1.0)
+        {
+            ObserveFunctions();
+            _catalogueObserveElapsed = 0;
+        }
+        if (_catalogueSaveElapsed >= 30.0)
+        {
+            _catalogue.Save();
+            _catalogueSaveElapsed = 0;
+        }
         if (_inspectorAccumulator >= 0.20)
         {
             RefreshInspector();
             _inspectorAccumulator = 0.0;
         }
+        if (!_paused && !_simulationFaulted && _simulationBatch is null && _stepAccumulator >= FixedDelta)
+        {
+            SimulationWorld batchWorld = _world;
+            int requested = (int)Math.Min(MaximumStepsPerFrame, _stepAccumulator / FixedDelta);
+            Func<int> batch = () =>
+            {
+                int executed = 0;
+                long started = System.Diagnostics.Stopwatch.GetTimestamp();
+                do
+                {
+                    batchWorld.Step();
+                    executed++;
+                } while (executed < requested &&
+                    System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds < 8.0);
+                return executed;
+            };
+            _simulationBatch = _synchronousDiagnostic ? Task.FromResult(batch()) : Task.Run(batch);
+        }
+    }
+
+    private bool CompleteSimulationBatch(bool wait)
+    {
+        if (_simulationFaulted) return false;
+        if (_simulationBatch is null) return true;
+        if (!wait && !_simulationBatch.IsCompleted) return false;
+        Task<int> completed = _simulationBatch;
+        _simulationBatch = null;
+        int executed;
+        try { executed = completed.GetAwaiter().GetResult(); }
+        catch (Exception error)
+        {
+            _simulationFaulted = true;
+            _paused = true;
+            _stepAccumulator = 0;
+            _hud.SetPaused(true);
+            _hud.UpdateStatus("模拟异常已暂停；可重置世界。" + error.Message);
+            GD.PushError(error.ToString());
+            return false;
+        }
+        _stepAccumulator = Math.Max(0, _stepAccumulator - executed * FixedDelta);
+        _rateWindowSteps += executed;
+        return true;
     }
 
     public override void _Input(InputEvent inputEvent)
     {
+        if (inputEvent is InputEventKey shortcut && shortcut.Pressed && !shortcut.Echo &&
+            (shortcut.Keycode == Key.G || (shortcut.Keycode == Key.Escape && _cataloguePanel.Visible)))
+        {
+            _hud.Visible = true;
+            _cataloguePanel.Toggle();
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+        if (_cataloguePanel.Visible) return;
         if (inputEvent is InputEventMouseButton button && button.ButtonIndex == MouseButton.Right)
         {
             if (button.Pressed)
@@ -151,6 +246,7 @@ public sealed partial class Stage3Main : Node3D
 
     public override void _UnhandledInput(InputEvent inputEvent)
     {
+        if (_cataloguePanel.Visible) return;
         if (inputEvent is InputEventMouseButton mouseButton)
         {
             if (mouseButton.Pressed && mouseButton.ButtonIndex == MouseButton.WheelUp)
@@ -224,10 +320,15 @@ public sealed partial class Stage3Main : Node3D
         _hud.HeatmapRequested += CycleHeatmap;
         _hud.MediumDiagnosticRequested += MoveSelectedToLandDiagnostic;
         _hud.MorphologyLabRequested += OpenMorphologyLab;
+        _hud.FunctionCatalogueRequested += _cataloguePanel.Toggle;
     }
 
     private void ResetWorld(int ancestors, int preRunSteps, string label)
     {
+        CompleteSimulationBatch(wait: true);
+        _simulationFaulted = false;
+        _catalogue.Save();
+        _catalogue.BeginWorld();
         SimulationConfig config = new()
         {
             WorldSize = 512f,
@@ -238,6 +339,7 @@ public sealed partial class Stage3Main : Node3D
             ResourceBudgetReferenceAncestors = 24
         };
         _world = new SimulationWorld(config, DefaultSeed, ancestors);
+        _observationTerrain = new ObservationTerrain(_world.Environment, config);
         if (preRunSteps > 0)
             _world.Run(preRunSteps);
         _selectedId = null;
@@ -247,12 +349,103 @@ public sealed partial class Stage3Main : Node3D
         RefreshSnapshotAndWorld();
         RefreshStatistics();
         RefreshInspector();
-        _hud.UpdateStatus($"已载入 {label}。资源承载目标约 1000 只，随演化与环境变化；不同起始数量共用同一物质预算。");
+        _hud.UpdateStatus($"已载入 {label}：祖先拥有随机的基础水生形态和基因，拉近可查看幼体差异。资源承载目标约 1000 只，不同起始数量共用同一物质预算。");
         UpdateModeLabel();
     }
 
+    public override void _ExitTree()
+    {
+        CompleteSimulationBatch(wait: true);
+        _catalogue?.Save();
+    }
+
+    private bool CanFocusCatalogueEntry(ObservedFunction entry)
+    {
+        if (entry.WorldId != _catalogue.WorldId || _snapshot is null) return false;
+        foreach (var organism in _snapshot.Organisms)
+            if (organism.Id == entry.RepresentativeId &&
+                organism.GenomeFingerprint.ToString("X16") == entry.RepresentativeGenome) return true;
+        return false;
+    }
+
+    private void ObserveFunctions()
+    {
+        if (_snapshot is null) return;
+        foreach (var organism in _snapshot.Organisms)
+        {
+            bool chemical = organism.ActiveSensorCount > 0 && organism.SensingEnergyLastStep > 1e-10 && Math.Abs(organism.ChemicalSensorSignal) > 1e-6;
+            bool vision = organism.ActiveVisualSensorCount > 0 && organism.SensingEnergyLastStep > 1e-10 && Math.Abs(organism.VisionSignal) > 1e-6;
+            bool ground = organism.AppendageContactCount > 0 && organism.AppendageSupport > 1e-5 &&
+                organism.AppendageGroundVelocity.LengthSquared() > 1e-8 && organism.AppendageEnergyLastStep > 1e-10;
+            bool cavity = organism.CavityTissueOxygenLastStep > 1e-9;
+            if (organism.AppendageContactCount > 0 && organism.AppendageSupport > 1e-5)
+                RecordFunction(organism, "ground-support", "附肢接地支撑",
+                    $"植地接触 {organism.AppendageContactCount}，支撑比例 {organism.AppendageSupport:P1}。",
+                    "在岸边观察支撑能否减少行动限制。能接地支撑不代表已经能行走，推进作用单独记录。");
+            if (ground)
+                RecordFunction(organism, "ground-propulsion", "附肢接地推进",
+                    $"接地推进 {organism.AppendageGroundVelocity.Length():F4}，本步附肢耗能 {organism.AppendageEnergyLastStep:E2}。",
+                    "观察浅滩到陆地的实际位移、失水和能量消耗。具有附肢外观不等于可用的腿，只有实际接地推进才会记录。");
+            if (cavity)
+                RecordFunction(organism, "cavity-supply", "气腔向组织供氧",
+                    $"本步组织供氧 {organism.CavityTissueOxygenLastStep:E2}，腔氧 {organism.CavityOxygen:F5}/{organism.CavityOxygenCapacity:F5}。",
+                    "观察储气耗尽后是否能补气，以及离水后的保水成本。供氧和通气共同工作才有持续呼吸的可能。");
+            if (organism.CavityVentilationLastStep > 1e-9)
+                RecordFunction(organism, "cavity-ventilation", "气腔换气",
+                    $"本步外界通气补氧 {organism.CavityVentilationLastStep:E2}，腔体耗能 {organism.CavityEnergyLastStep:E2}。",
+                    "观察开口在空气、水线和水下的变化。开口能补气不等于氧能运输到身体，组织供氧单独记录。");
+            int combination = (chemical ? 1 : 0) | (vision ? 2 : 0) | (ground ? 4 : 0) | (cavity ? 8 : 0);
+            if (System.Numerics.BitOperations.PopCount((uint)combination) >= 2)
+            {
+                string name = string.Join(" + ", new[] { chemical ? "化学感知" : null,
+                    vision ? "方向光感" : null, ground ? "接地推进" : null, cavity ? "气腔供氧" : null }.Where(value => value is not null));
+                RecordFunction(organism, $"combination-{combination}", "组合：" + name,
+                    "同一个体在本次观察中同时发挥了这些作用：" + name + "。",
+                    "可收藏并定位这个组合。功能同时存在不代表产生协同优势；比较能耗、存活和成熟后代后再判断。");
+            }
+            if (organism.ActiveVisualSensorCount > 0 && organism.SensingEnergyLastStep > 1e-10 &&
+                Math.Abs(organism.VisionSignal) > 1e-6)
+                RecordFunction(organism, "directional-light", "简单视觉：方向光感",
+                    $"活跃方向受体 {organism.ActiveVisualSensorCount}，光信号 {organism.VisionSignal:F3}。",
+                    "观察不同方向、深度与遮挡条件下的行动变化。这是有方向的光信号，不是图像识别；是否有生存收益需要跟踪后代。");
+            if (organism.OxygenUptakeLastStep > 1e-9 && organism.WaterExposedArea > 1e-6 && organism.Immersion > 0.95)
+                RecordFunction(organism, "aquatic-exchange", "水中气体交换",
+                    $"水下外露面积 {organism.WaterExposedArea:F3}，本步摄氧 {organism.OxygenUptakeLastStep:E2}。",
+                    "比较不同水层中的摄氧与生存。这是水中交换的观察记录，不等于已经形成鳃。");
+            if (organism.OxygenUptakeLastStep > 1e-9 && organism.AirExposedArea > 1e-6 && organism.Immersion < 0.05)
+                RecordFunction(organism, "air-exchange", "空气气体交换",
+                    $"空气外露面积 {organism.AirExposedArea:F3}，本步摄氧 {organism.OxygenUptakeLastStep:E2}。",
+                    "比较岸边个体的水分、供氧和存活。皮肤交换也会出现这条记录，不能据此认定已经形成肺。");
+            if (organism.Immersion > 0.5 && organism.Velocity.LengthSquared() > 1e-6 &&
+                organism.LocalActuationForce.LengthSquared() > 1e-9)
+                RecordFunction(organism, "aquatic-propulsion", "水中主动运动",
+                    $"游动速度 {organism.Velocity.Length():F3}，局部驱动力 {organism.LocalActuationForce.Length():F3}。",
+                    "通过稀疏资源斑块观察移动距离与能量成本。速度更高不一定使后代更成功。");
+            if (organism.ActiveSensorCount > 0 && organism.SensingEnergyLastStep > 1e-10 &&
+                Math.Abs(organism.ChemicalSensorSignal) > 1e-6)
+                RecordFunction(organism, "chemical-sensing", "化学资源感知",
+                    $"付费感知已工作，化学信号 {organism.ChemicalSensorSignal:F3}。",
+                    "用资源笔刷形成稀疏食物斑块，观察个体是否更有效地寻找资源，并追踪后代。资源减少也可能使谱系灭绝。");
+            if (organism.ActiveSensorCount > 0 && organism.SensingEnergyLastStep > 1e-10 &&
+                organism.ContactSensorSignal > 1e-6)
+                RecordFunction(organism, "contact-sensing", "接触感知",
+                    $"付费接触信号 {organism.ContactSensorSignal:F3}，邻居 {organism.ContactNeighborCount}。",
+                    "观察拥挤区域中个体的避让与争夺。收藏后可定位代表个体，对比它与后代的行为。");
+            if (organism.InteractionIntensity > 1e-6 && organism.ContactNeighborCount > 0)
+                RecordFunction(organism, "local-interaction", "局部个体互动",
+                    $"互动状态 {organism.InteractionState}，强度 {organism.InteractionIntensity:F3}。",
+                    "通过资源分布改变局部密度，观察争夺、避让及其生存代价。");
+        }
+    }
+
+    private void RecordFunction(OrganismPresentationState organism, string key, string name,
+        string evidence, string guidance) => _catalogue.Observe(key, name, evidence, guidance,
+            DefaultSeed, _snapshot.Statistics.SimulatedSeconds, organism.Generation,
+            organism.Id, organism.GenomeFingerprint);
+
     private void TogglePause()
     {
+        if (!CompleteSimulationBatch(wait: true)) return;
         _paused = !_paused;
         _hud.SetPaused(_paused);
         UpdateModeLabel();
@@ -260,6 +453,7 @@ public sealed partial class Stage3Main : Node3D
 
     private void SingleStep()
     {
+        if (!CompleteSimulationBatch(wait: true)) return;
         _paused = true;
         _hud.SetPaused(true);
         _world.Step();
@@ -271,6 +465,7 @@ public sealed partial class Stage3Main : Node3D
 
     private void SetSpeed(double speed)
     {
+        if (_simulationFaulted) return;
         _timeScale = speed;
         _paused = false;
         _hud.SetPaused(false);
@@ -285,6 +480,7 @@ public sealed partial class Stage3Main : Node3D
 
     private void CycleHeatmap()
     {
+        if (!CompleteSimulationBatch(wait: true)) return;
         int count = Enum.GetValues<HeatmapMode>().Length;
         _heatmapMode = (HeatmapMode)(((int)_heatmapMode + 1) % count);
         _worldRenderer.BuildEnvironment(_world.Environment, _world.Config.WorldSize, _heatmapMode);
@@ -293,6 +489,7 @@ public sealed partial class Stage3Main : Node3D
 
     private void ApplyBrush(NumericsVector2 position, double direction)
     {
+        if (!CompleteSimulationBatch(wait: true)) return;
         EnvironmentBrushChannel channel = _toolMode == ToolMode.Minerals
             ? EnvironmentBrushChannel.Minerals
             : EnvironmentBrushChannel.Temperature;
@@ -313,6 +510,7 @@ public sealed partial class Stage3Main : Node3D
 
     private void MoveSelectedToLandDiagnostic()
     {
+        if (!CompleteSimulationBatch(wait: true)) return;
         if (_selectedId is null && _snapshot.Organisms.Count > 0)
             _selectedId = _snapshot.Organisms[0].Id;
         if (_selectedId is null)
@@ -397,14 +595,16 @@ public sealed partial class Stage3Main : Node3D
             : $"已选择并聚焦个体 {nearest.Value.Id}，屏幕命中距离 {nearestDistance:F1}px。 ");
     }
 
-    private void RefreshSnapshotAndWorld()
+    private bool RefreshSnapshotAndWorld()
     {
+        if (!CompleteSimulationBatch(wait: false)) return false;
         _snapshot = _world.CapturePresentationSnapshot();
         _renderedRegions = _worldRenderer.UpdateOrganisms(_snapshot, _selectedId,
             new System.Numerics.Vector2(_cameraTarget.X + _world.Config.WorldSize*0.5f,
                 _cameraTarget.Z + _world.Config.WorldSize*0.5f));
         if (_selectedId is not null && !_snapshot.Organisms.Any(organism => organism.Id == _selectedId.Value))
             _selectedId = null;
+        return true;
     }
 
     private void RefreshStatistics()
@@ -471,10 +671,15 @@ public sealed partial class Stage3Main : Node3D
         _hud.UpdateInspector(
             $"ID {organism.Id} · 亲代 {organism.ParentId} · 第 {organism.Generation} 代\n" +
             $"基因组 {organism.GenomeId} · {organism.GenomeFingerprint:X16}\n" +
+            $"{(organism.ParentId==0 ? "初始祖先基因" : $"出生时 {organism.BirthMutationCount} 次突变")} · 子代突变概率 {organism.OffspringMutationProbability:P1}\n" +
             $"基因区域 {organism.GenomeRegionCount} · 当前身体区域 {organism.Regions.Count}\n" +
             $"年龄 {organism.AgeSeconds:F1}s · 成熟 {organism.Maturity:P1} · 发育 {organism.DevelopmentCompletion:P1}\n" +
             $"能量 {organism.Energy:F3} · 储存物质 {organism.StoredMatter:F3} · 繁殖冷却 {organism.ReproductionCooldownSeconds:F1}s\n" +
             $"探索倾向 {organism.ExplorationDrive:P0} · 食物信号变化 {organism.ForagingTrend:+0.000;-0.000;0.000}\n" +
+            $"表达强度 {organism.MeanTissueExpression:F3} · 活跃受体 {organism.ActiveSensorCount}（方向光感 {organism.ActiveVisualSensorCount}）\n" +
+            $"化学/接触/视觉信号 {organism.ChemicalSensorSignal:F3}/{organism.ContactSensorSignal:F3}/{organism.VisionSignal:F3} · 感知耗能 {organism.SensingEnergyLastStep:E2}\n" +
+            $"附肢接地 {organism.AppendageContactCount} · 支撑 {organism.AppendageSupport:P0} · 推进 {organism.AppendageGroundVelocity.Length():F3} · 耗能 {organism.AppendageEnergyLastStep:E2}\n" +
+            $"腔氧 {organism.CavityOxygen:F4}/{organism.CavityOxygenCapacity:F4} · 换气/供组织 {organism.CavityVentilationLastStep:E2}/{organism.CavityTissueOxygenLastStep:E2} · 耗能 {organism.CavityEnergyLastStep:E2}\n" +
             $"接触压力 {organism.ContactPressure:P1} · 接触邻居 {organism.ContactNeighborCount}\n" +
             $"互动 {interaction} · 对方 ID {opponent} · 争位强度 {organism.InteractionIntensity:P1}\n" +
             $"本步食物需求满足 {foodSatisfaction}\n" +
@@ -583,7 +788,7 @@ public sealed partial class Stage3Main : Node3D
             if (sampleX < 0f || sampleX > _world.Config.WorldSize ||
                 sampleY < 0f || sampleY > _world.Config.WorldSize)
                 break;
-            double terrainHeight = _world.Environment.Sample(new NumericsVector2(sampleX, sampleY)).TerrainHeight;
+            double terrainHeight = _observationTerrain.Height(new NumericsVector2(sampleX, sampleY));
             distance = ((float)terrainHeight - origin.Y) / direction.Y;
             if (distance <= 0f)
                 break;
@@ -620,10 +825,9 @@ public sealed partial class Stage3Main : Node3D
         float half = _world.Config.WorldSize * 0.5f;
         float worldX = Math.Clamp(_cameraTarget.X + half, 0f, _world.Config.WorldSize);
         float worldY = Math.Clamp(_cameraTarget.Z + half, 0f, _world.Config.WorldSize);
-        EnvironmentSample sample = _world.Environment.Sample(new NumericsVector2(worldX, worldY));
-        _cameraTarget.Y = sample.WaterDepth > 0.0
-            ? (float)sample.WaterSurface
-            : (float)sample.TerrainHeight + 0.5f;
+        double height = _observationTerrain.Height(new NumericsVector2(worldX, worldY));
+        _cameraTarget.Y = height < _observationTerrain.WaterSurface
+            ? (float)_observationTerrain.WaterSurface : (float)height + 0.5f;
     }
 
     private void ToggleFullscreen()
@@ -661,6 +865,42 @@ public sealed partial class Stage3Main : Node3D
             }
         };
         AddChild(worldEnvironment);
+    }
+
+    private async void RunWorkerSmoke()
+    {
+        SetSpeed(100);
+        long started = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (_snapshot.Statistics.StepIndex < 60 &&
+            System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds < 10)
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        _paused = true;
+        CompleteSimulationBatch(wait: true);
+        RefreshSnapshotAndWorld();
+        long steps = _world.StepIndex;
+        SimulationWorld reference = new(_world.Config, DefaultSeed, 24);
+        reference.Run((int)steps);
+        bool deterministic = steps >= 60 &&
+            reference.CaptureSnapshot().StateFingerprint == _world.CaptureSnapshot().StateFingerprint;
+        _cataloguePanel.Toggle();
+        long pausedStep = _world.StepIndex;
+        for (int frame = 0; frame < 3; frame++)
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        bool pauseStable = _world.StepIndex == pausedStep;
+        _cataloguePanel.Toggle();
+        SetSpeed(1);
+        _Process(FixedDelta);
+        SetTool(ToolMode.Minerals);
+        ApplyBrush(new NumericsVector2(256, 256), 1);
+        bool commandSerialized = _simulationBatch is null && _world.RecentInterventions.Count == 1;
+        _Process(FixedDelta);
+        ResetWorld(24, 0, "工作线程重置诊断");
+        _paused = true;
+        bool resetSafe = _simulationBatch is null && _world.StepIndex == 0;
+        bool passed = deterministic && pauseStable && commandSerialized && resetSafe;
+        GD.Print($"WORKER_SMOKE {(passed ? "PASS" : "FAIL")} steps={steps} deterministic={deterministic} " +
+            $"pause={pauseStable} command_serialized={commandSerialized} reset={resetSafe}");
+        GetTree().Quit(passed ? 0 : 1);
     }
 
     private void RunHeadlessInteractionSmoke()
@@ -723,9 +963,50 @@ public sealed partial class Stage3Main : Node3D
             organism.Depth <= organism.Environment.WaterDepth + 1e-5);
         double oxygenTolerance = Math.Max(1e-8, Math.Abs(statistics.InitialOxygen) * 1e-10);
         bool oxygenBudget = Math.Abs(statistics.OxygenError) <= oxygenTolerance;
+        ObserveFunctions();
+        FunctionCatalogue catalogueCopy = new(false, false);
+        catalogueCopy.RestoreJson(_catalogue.ExportJson());
+        ObservedFunction? example = catalogueCopy.Entries.FirstOrDefault();
+        bool catalogueRoundTrip = example is not null;
+        if (example is not null)
+        {
+            catalogueCopy.ToggleFavorite(example.Key);
+            FunctionCatalogue restored = new(false, false);
+            restored.RestoreJson(catalogueCopy.ExportJson());
+            catalogueRoundTrip = restored.Entries.Any(entry => entry.Key == example.Key && entry.Favorite) &&
+                CanFocusCatalogueEntry(example);
+            string previousWorld = example.WorldId;
+            example.WorldId = "different-world";
+            catalogueRoundTrip &= !CanFocusCatalogueEntry(example);
+            example.WorldId = previousWorld;
+        }
+        bool wasPaused = _paused;
+        _cataloguePanel.Toggle();
+        bool cataloguePause = _paused && _cataloguePanel.Visible;
+        _cataloguePanel.Toggle();
+        cataloguePause &= _paused == wasPaused && !_cataloguePanel.Visible;
+        string archiveTestPath = "user://catalogue-smoke-" + Guid.NewGuid().ToString("N") + ".json";
+        bool catalogueDisk;
+        try
+        {
+            FunctionCatalogue disk = new(false, true, archiveTestPath);
+            disk.BeginWorld();
+            disk.Observe("test", "诊断记录", "作用", "引导", DefaultSeed, 1, 0, 1, 123);
+            disk.Save();
+            disk.ToggleFavorite("test");
+            disk.Save();
+            FunctionCatalogue loaded = new(true, true, archiveTestPath);
+            catalogueDisk = loaded.Entries.SingleOrDefault()?.Favorite == true;
+        }
+        finally
+        {
+            System.IO.File.Delete(ProjectSettings.GlobalizePath(archiveTestPath));
+            System.IO.File.Delete(ProjectSettings.GlobalizePath(archiveTestPath + ".tmp"));
+        }
         bool passed =
             statistics.StepIndex == 81 &&
-            statistics.Population >= 300 &&
+            statistics.Population > 0 &&
+            statistics.Population == 300 + statistics.CumulativeBirths - statistics.CumulativeDeaths &&
             statistics.TotalBodyRegions >= statistics.Population &&
             _world.RecentInterventions.Count == 2 &&
             Math.Abs(statistics.MatterError) <= tolerance &&
@@ -739,7 +1020,7 @@ public sealed partial class Stage3Main : Node3D
             responsivePanels &&
             movementPaid &&
             aquaticDepthValid &&
-            oxygenBudget;
+            oxygenBudget && catalogueRoundTrip && cataloguePause && catalogueDisk;
         GD.Print(
             $"STAGE3_SMOKE {(passed ? "PASS" : "FAIL")} " +
             $"step={statistics.StepIndex} population={statistics.Population} " +
@@ -749,8 +1030,25 @@ public sealed partial class Stage3Main : Node3D
             $"right_drag={rightDragRotates} close_zoom={closeZoomAvailable} responsive={responsivePanels} " +
             $"movement_paid={movementPaid} average_speed={statistics.AverageSpeed:F4} " +
             $"aquatic_depth={aquaticDepthValid} oxygen_budget={oxygenBudget} " +
+            $"catalogue_roundtrip={catalogueRoundTrip} catalogue_pause={cataloguePause} catalogue_disk={catalogueDisk} " +
             $"matter_error={statistics.MatterError:E6} oxygen_error={statistics.OxygenError:E6}");
         GetTree().Quit(passed ? 0 : 1);
+    }
+
+    private async void CaptureFunctionCatalogue()
+    {
+        _world.Run(80);
+        RefreshSnapshotAndWorld();
+        ObserveFunctions();
+        _cataloguePanel.Toggle();
+        for (int frame = 0; frame < 6; frame++)
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        string directory = ProjectSettings.GlobalizePath("res://artifacts");
+        DirAccess.MakeDirRecursiveAbsolute(directory);
+        string path = System.IO.Path.Combine(directory, "function-catalogue.png");
+        Error error = GetViewport().GetTexture().GetImage().SavePng(path);
+        GD.Print($"CAPTURE_FUNCTION_CATALOGUE {error} entries={_catalogue.Entries.Count} path={path}");
+        GetTree().Quit(error == Error.Ok && _catalogue.Entries.Count > 0 ? 0 : 1);
     }
 
     private async void CaptureSelectedWorldFrame()
@@ -818,6 +1116,7 @@ public sealed partial class Stage3Main : Node3D
         }
         long allocated = GC.GetTotalAllocatedBytes(false) - allocationStart;
         _world.CollectPerformanceMetrics = false;
+        SimulationPerformanceMetrics profileMetrics = _world.PerformanceMetrics;
         long meshesBuilt = _worldRenderer.SkinMeshesBuilt - meshBuildStart;
 
         ResetWorld(ancestors, preRunSteps, $"1× 帧采样 {ancestors}");
@@ -830,7 +1129,7 @@ public sealed partial class Stage3Main : Node3D
         List<double> frameTimes = new(4096);
         long previous = System.Diagnostics.Stopwatch.GetTimestamp();
         long samplingStarted = previous;
-        long firstStep = _world.StepIndex;
+        long firstStep = _snapshot.Statistics.StepIndex;
         long steadyMeshStart = _worldRenderer.SkinMeshesBuilt;
         trackedStart = _snapshot.Organisms.First(organism => organism.Id == trackedStart.Id);
         ulong activeId=0;int activeRegionId=-1;
@@ -871,6 +1170,9 @@ public sealed partial class Stage3Main : Node3D
                 }
             }
         }
+        _paused = true;
+        CompleteSimulationBatch(wait: true);
+        RefreshSnapshotAndWorld();
         frameTimes.Sort();
         double sampledSeconds = System.Diagnostics.Stopwatch.GetElapsedTime(samplingStarted).TotalSeconds;
         double averageFrame = frameTimes.Average();
@@ -893,12 +1195,12 @@ public sealed partial class Stage3Main : Node3D
             $"render_submit_ms={renderMilliseconds / cycles:F3} allocated_mb={allocated / 1048576.0:F2} " +
             $"alloc_step_kb={stepAllocated / cycles / 1024.0:F1} alloc_snapshot_kb={snapshotAllocated / cycles / 1024.0:F1} " +
             $"alloc_render_kb={renderAllocated / cycles / 1024.0:F1} " +
-            $"parts_ms={_world.PerformanceMetrics.EnvironmentMilliseconds/cycles:F2}/" +
-            $"{_world.PerformanceMetrics.SeparationMilliseconds/cycles:F2}/" +
-            $"{_world.PerformanceMetrics.ExchangeMilliseconds/cycles:F2}/" +
-            $"{_world.PerformanceMetrics.ControlTransportMilliseconds/cycles:F2}/" +
-            $"{_world.PerformanceMetrics.MechanicsMilliseconds/cycles:F2}/" +
-            $"{_world.PerformanceMetrics.MetabolismGrowthMilliseconds/cycles:F2} " +
+            $"parts_ms={profileMetrics.EnvironmentMilliseconds/cycles:F2}/" +
+            $"{profileMetrics.SeparationMilliseconds/cycles:F2}/" +
+            $"{profileMetrics.ExchangeMilliseconds/cycles:F2}/" +
+            $"{profileMetrics.ControlTransportMilliseconds/cycles:F2}/" +
+            $"{profileMetrics.MechanicsMilliseconds/cycles:F2}/" +
+            $"{profileMetrics.MetabolismGrowthMilliseconds/cycles:F2} " +
             $"skin_meshes_built={meshesBuilt} frame_avg_ms={averageFrame:F3} frame_p95_ms={p95:F3} " +
             $"frame_max_ms={frameTimes[^1]:F3} sampled_frames={frameTimes.Count} sampled_steps={sampledSteps} " +
             $"actual_scale={sampledSteps * FixedDelta / sampledSeconds:F3}x steady_mesh_builds={_worldRenderer.SkinMeshesBuilt-steadyMeshStart} " +
