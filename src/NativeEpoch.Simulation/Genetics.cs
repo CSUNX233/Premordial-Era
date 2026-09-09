@@ -75,6 +75,10 @@ public readonly record struct RegionGene(
     double TargetLength,
     double TargetWidth,
     double RelativeAngle,
+    double CrossSectionAspect,
+    double Taper,
+    double Curvature,
+    double Roundness,
     double Density,
     double Rigidity,
     double Toughness,
@@ -91,6 +95,10 @@ public readonly record struct RegionGene(
         double.IsFinite(TargetLength) &&
         double.IsFinite(TargetWidth) &&
         double.IsFinite(RelativeAngle) &&
+        double.IsFinite(CrossSectionAspect) &&
+        double.IsFinite(Taper) &&
+        double.IsFinite(Curvature) &&
+        double.IsFinite(Roundness) &&
         double.IsFinite(Density) &&
         double.IsFinite(Rigidity) &&
         double.IsFinite(Toughness) &&
@@ -132,25 +140,33 @@ public sealed class Genome
     public IReadOnlyList<ControllerNodeGene> ControllerNodes => _readOnlyControllerNodes;
     public ulong Fingerprint { get; }
 
+    public RegionGene GetRegion(int regionId)
+    {
+        foreach (RegionGene region in _regions)
+            if (region.RegionId == regionId)
+                return region;
+        throw new KeyNotFoundException($"Genome has no region {regionId}.");
+    }
+
     public static Genome CreateAncestor() => new(
     [
         new RegionGene(
             0, -1, -1, -1, true,
-            0.0, 0.80, 0.65, 0.0,
+            0.0, 0.80, 0.65, 0.0, 0.88, 0.10, 0.06, 0.88,
             0.65, 0.50, 0.60, 0.35, 0.55,
             0.25, 0.20, 0.50, 0.55, 0.45),
         new RegionGene(
             1, 0, 0, 0, false,
-            0.20, 1.10, 0.35, -0.60,
+            0.20, 1.10, 0.35, -0.60, 0.72, 0.34, -0.18, 0.72,
             0.40, 0.30, 0.40, 0.75, 0.80,
             0.35, 0.25, 0.45, 0.30, 0.25),
         new RegionGene(
             2, 0, 0, 0, false,
-            0.45, 0.70, 0.50, 0.80,
+            0.45, 0.70, 0.50, 0.80, 0.48, 0.22, 0.24, 0.80,
             0.55, 0.65, 0.70, 0.45, 0.40,
             0.75, 0.35, 0.60, 0.65, 0.65)
     ],
-    mutationRate: 0.18,
+    mutationRate: 0.28,
     metabolism: MetabolicGene.AquaticAncestor,
     controllerNodes:
     [
@@ -190,6 +206,10 @@ public sealed class Genome
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.TargetLength)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.TargetWidth)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.RelativeAngle)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.CrossSectionAspect)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.Taper)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.Curvature)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.Roundness)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.Density)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.Rigidity)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.Toughness)));
@@ -299,7 +319,11 @@ public static class GenomeValidator
             region.AppearanceMaturity is < 0.0 or > 1.0 ||
             region.TargetLength is < 0.1 or > 3.0 ||
             region.TargetWidth is < 0.1 or > 2.0 ||
-            region.RelativeAngle < -Math.PI || region.RelativeAngle > Math.PI)
+            region.RelativeAngle < -Math.PI || region.RelativeAngle > Math.PI ||
+            region.CrossSectionAspect is < 0.15 or > 1.0 ||
+            region.Taper is < 0.0 or > 0.85 ||
+            region.Curvature is < -1.0 or > 1.0 ||
+            region.Roundness is < 0.2 or > 1.0)
         {
             throw new InvalidOperationException($"Region {region.RegionId} has unsafe geometry or timing values.");
         }
@@ -503,21 +527,48 @@ public sealed class GenomeMutator
     {
         int index = random.NextInt(regions.Count);
         RegionGene gene = regions[index];
-        int property = random.NextInt(8);
-        double delta = (random.NextUnitDouble() - 0.5) * 0.18;
+        // Keep a morphology budget independent of the number of physiological
+        // traits. Mostly local changes, with occasional larger inherited steps;
+        // the resulting body still has to pay for its growth and maintenance.
+        int property = random.NextUnitDouble() < 0.65
+            ? random.NextInt(8) : 8 + random.NextInt(10);
+        bool large = random.NextUnitDouble() < 0.15;
+        double sign = random.NextUnitDouble() < 0.5 ? -1.0 : 1.0;
+        double magnitude = random.NextUnitDouble();
+        double delta = sign * (large ? 0.20 + 0.25 * magnitude : 0.025 + 0.10 * magnitude);
+        double sizeFactor = Math.Exp(sign * (large ? 0.30 + 0.35 * magnitude : 0.05 + 0.17 * magnitude));
+        double angleDelta = sign * (large ? 0.45 + 0.55 * magnitude : 0.06 + 0.24 * magnitude);
         RegionGene changed = property switch
         {
-            0 => gene with { TargetLength = Math.Clamp(gene.TargetLength + delta, 0.1, 3.0) },
-            1 => gene with { TargetWidth = Math.Clamp(gene.TargetWidth + delta, 0.1, 2.0) },
-            2 => gene with { RelativeAngle = Math.Clamp(gene.RelativeAngle + delta, -Math.PI, Math.PI) },
-            3 => gene with { Density = ClampUnit(gene.Density + delta) },
-            4 => gene with { Permeability = ClampUnit(gene.Permeability + delta) },
-            5 => gene with { LightReactivity = ClampUnit(gene.LightReactivity + delta) },
-            6 => gene with { CatalyticActivity = ClampUnit(gene.CatalyticActivity + delta) },
-            _ => gene with { StorageFraction = ClampUnit(gene.StorageFraction + delta) }
+            0 => gene with { TargetLength = ReflectRange(gene.TargetLength * sizeFactor, 0.1, 3.0) },
+            1 => gene with { TargetWidth = ReflectRange(gene.TargetWidth * sizeFactor, 0.1, 2.0) },
+            2 => gene with { RelativeAngle = ReflectRange(gene.RelativeAngle + angleDelta, -Math.PI, Math.PI) },
+            3 => gene with { CrossSectionAspect = ReflectRange(gene.CrossSectionAspect + delta, 0.15, 1.0) },
+            4 => gene with { Taper = ReflectRange(gene.Taper + delta, 0.0, 0.85) },
+            5 => gene with { Curvature = ReflectRange(gene.Curvature + delta, -1.0, 1.0) },
+            6 => gene with { Roundness = ReflectRange(gene.Roundness + delta, 0.2, 1.0) },
+            7 => gene with { Pigment = ReflectRange(gene.Pigment + delta, 0.0, 1.0) },
+            8 => gene with { Density = ReflectRange(gene.Density + delta, 0.0, 1.0) },
+            9 => gene with { Rigidity = ReflectRange(gene.Rigidity + delta, 0.0, 1.0) },
+            10 => gene with { Toughness = ReflectRange(gene.Toughness + delta, 0.0, 1.0) },
+            11 => gene with { Permeability = ReflectRange(gene.Permeability + delta, 0.0, 1.0) },
+            12 => gene with { LightReactivity = ReflectRange(gene.LightReactivity + delta, 0.0, 1.0) },
+            13 => gene with { CatalyticActivity = ReflectRange(gene.CatalyticActivity + delta, 0.0, 1.0) },
+            14 => gene with { Contractility = ReflectRange(gene.Contractility + delta, 0.0, 1.0) },
+            15 => gene with { SignalConductivity = ReflectRange(gene.SignalConductivity + delta, 0.0, 1.0) },
+            16 => gene with { StorageFraction = ReflectRange(gene.StorageFraction + delta, 0.0, 1.0) },
+            _ when !gene.IsCore => gene with { AppearanceMaturity = ReflectRange(gene.AppearanceMaturity + delta, 0.0, 0.95) },
+            _ => gene with { Contractility = ReflectRange(gene.Contractility + delta, 0.0, 1.0) }
         };
         regions[index] = changed;
-        return $"region {gene.RegionId} continuous property {property} changed by {delta:+0.000;-0.000}";
+        return $"region {gene.RegionId} continuous property {property}, {(large ? "large" : "small")} inherited step";
+    }
+
+    private static double ReflectRange(double value, double minimum, double maximum)
+    {
+        double width = maximum - minimum;
+        double offset = ((value - minimum) % (2.0 * width) + 2.0 * width) % (2.0 * width);
+        return minimum + (offset <= width ? offset : 2.0 * width - offset);
     }
 
     private static string DuplicateRegion(List<RegionGene> regions, DeterministicRandom random)

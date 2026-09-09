@@ -9,15 +9,41 @@ internal static class HeadlessProgram
     {
         try
         {
-            Options options = Options.Parse(args);
+            bool diagnoseEcology = args.Contains("--diagnose-ecology");
+            bool diagnoseMovement = args.Contains("--diagnose-movement");
+            bool diagnoseCompetition = args.Contains("--diagnose-competition");
+            Options options = Options.Parse(args.Where(a => a != "--diagnose-ecology" && a != "--diagnose-movement" && a != "--diagnose-competition").ToArray());
             if (options.ShowHelp)
             {
                 PrintHelp();
                 return 0;
             }
 
+            if (diagnoseEcology)
+                return EcologyDiagnostics.Run(CreateWorld(options), options.Steps, options.ReportEvery);
+            if (diagnoseCompetition)
+            {
+                SpatialCompetitionDiagnosticResult result = SpatialCompetitionDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed ? "COMPETITION PASS" : "COMPETITION FAIL");
+                return result.Passed ? 0 : 1;
+            }
+            if (diagnoseMovement)
+            {
+                MovementBehaviorDiagnosticResult movement = MovementBehaviorDiagnostics.Run();
+                Console.WriteLine($"steering_heading(-0.5/0/+0.5)={movement.NegativeSteeringHeading:F3}/{movement.NeutralSteeringHeading:F3}/{movement.PositiveSteeringHeading:F3}");
+                Console.WriteLine($"healthy_120s net={movement.HealthyNetDisplacement:F3} path={movement.HealthyPathLength:F3} body_lengths={movement.HealthyBodyLengths:F2} visited_cells={movement.VisitedResourceCells} span={movement.BoundsSpan}");
+                Console.WriteLine($"low_energy_10s displacement={movement.LowEnergyDisplacement:F6} activity={movement.LowEnergyMeanActivity:F6}");
+                Console.WriteLine(movement.Passed ? "MOVEMENT PASS" : "MOVEMENT FAIL");
+                return movement.Passed ? 0 : 1;
+            }
+
             if (options.DiagnoseMutations)
                 return DiagnoseMutations(options);
+            if (options.ExperimentAdaptation)
+                return RunAdaptationExperiment();
+            if (options.ExperimentSupplement)
+                return RunAdaptationSupplement();
             return options.Verify ? Verify(options) : Simulate(options);
         }
         catch (Exception exception) when (
@@ -29,6 +55,39 @@ internal static class HeadlessProgram
         }
     }
 
+    private static int RunAdaptationExperiment()
+    {
+        Console.WriteLine("phase2C bounded natural-lineage paired assays (fresh-state common garden; mutations frozen only during replay)");
+        IReadOnlyList<LineageExperimentResult> results = AdaptationExperiment.RunThreeSeeds();
+        foreach (LineageExperimentResult result in results)
+        {
+            static string F(FitnessAssay f) => $"repro={f.ReproductiveIndex:F2},pop={f.FinalPopulation},birth={f.Births},death={f.Deaths},mature_child/grand={f.MatureDescendants}/{f.MatureGrandchildren},gen={f.MaximumGeneration},energy={f.LivingEnergy:F2},hydration={f.MeanHydration:F2}";
+            Console.WriteLine($"seed={result.Seed} candidate={result.CandidateFound} id={result.CandidateId} parent={result.CandidateParentId} generation={result.CandidateGeneration} lineage={result.LineagePath} genome={result.AncestorFingerprint:X8}->{result.CandidateFingerprint:X8} revert={result.ReversionKind} common_garden={result.CommonGardenGenerationCompleted}");
+            if (!result.CandidateFound)
+            {
+                Console.WriteLine($"  ancestor baselines water[{F(result.AncestorWater)}] land[{F(result.AncestorLand)}]");
+                Console.WriteLine($"  conclusion={result.Conclusion}");
+                continue;
+            }
+            Console.WriteLine($"  water ancestor[{F(result.AncestorWater)}] candidate[{F(result.CandidateWater)}] reverted[{F(result.RevertedWater)}]");
+            Console.WriteLine($"  land  ancestor[{F(result.AncestorLand)}] candidate[{F(result.CandidateLand)}] reverted[{F(result.RevertedLand)}]");
+            Console.WriteLine($"  source_advantage={result.SourceHabitatAdvantage} reversion_support={result.ReversionSupportsChange} land_adaptation={result.LandAdaptationObserved} conclusion={result.Conclusion}");
+        }
+        Console.WriteLine($"PHASE2C COMPLETE candidates={results.Count(r=>r.CandidateFound)}/3 supported={results.Count(r=>r.SourceHabitatAdvantage&&r.ReversionSupportsChange)}/3 land={results.Count(r=>r.LandAdaptationObserved)}/3");
+        return 0;
+    }
+
+    private static int RunAdaptationSupplement()
+    {
+        LineageExperimentResult result=AdaptationExperiment.Run(20261011,3000,6500,true);
+        static string F(FitnessAssay f)=>$"repro={f.ReproductiveIndex:F2},birth={f.Births},death={f.Deaths},mature_child/grand={f.MatureDescendants}/{f.MatureGrandchildren},gen={f.MaximumGeneration}";
+        Console.WriteLine("phase2C fixed finite-resource common-garden supplement: identical +4 mineral brush, radius 8, per founder site; externally accounted");
+        Console.WriteLine($"seed={result.Seed} candidate={result.CandidateFound} id={result.CandidateId} parent={result.CandidateParentId} lineage={result.LineagePath} common_garden={result.CommonGardenGenerationCompleted} revert={result.ReversionKind}");
+        Console.WriteLine($"water ancestor[{F(result.AncestorWater)}] candidate[{F(result.CandidateWater)}] reverted[{F(result.RevertedWater)}]");
+        Console.WriteLine($"land ancestor[{F(result.AncestorLand)}] candidate[{F(result.CandidateLand)}] reverted[{F(result.RevertedLand)}]");
+        Console.WriteLine($"source_advantage={result.SourceHabitatAdvantage} reversion_support={result.ReversionSupportsChange} land_adaptation={result.LandAdaptationObserved} conclusion={result.Conclusion}");
+        return 0;
+    }
     private static int Simulate(Options options)
     {
         SimulationWorld world = CreateWorld(options);
@@ -108,7 +167,16 @@ internal static class HeadlessProgram
         bool transport = VerifyRegionalTransport(out bool orderInvariant, out bool brokenEdgeBlocks);
         bool exchangeTradeoff = VerifyExchangeTradeoff();
         bool oxygenLimited = VerifyOxygenLimitedMetabolism(options.Seed);
+        bool demandMetabolism = VerifyDemandLimitedMetabolism(options.Seed);
         bool finiteLightCompetition = VerifyFiniteLightCompetition(options.Seed);
+        bool sharedFounderBudget = VerifySharedFounderBudget(options.Seed);
+        MechanicsDiagnosticResult mechanics = MechanicsDiagnostics.Run();
+        bool geometryContract = MorphologyGenomeFactory.BuildSixDiagnostics().All(sample =>
+        {
+            DevelopingBody body = MorphologyGenomeFactory.FullyDeveloped(sample.Genome);
+            BodyGeometry geometry = BodyGeometryBuilder.Build(sample.Genome, body.Regions);
+            return geometry.Finite && geometry.Connected && geometry.RelativeVolumeError < 1e-10;
+        });
         (double minimumTerrain, double maximumTerrain, double maximumWaterDepth) = SampleTerrain(first);
         double tolerance = MatterTolerance(a.InitialMatter);
         bool matterConserved = Math.Abs(a.MatterError) <= tolerance;
@@ -118,8 +186,8 @@ internal static class HeadlessProgram
             cacheConsistent && growthPaid && forcedMutationsSafe && movementPaid &&
             a.AllFinite && b.AllFinite && matterConserved && initiallyAquatic && depthLegal &&
             noWaterRejected && depthAwareContact && mediumDifference && sealedSurface && transport &&
-            landDiagnostic && orderInvariant && brokenEdgeBlocks && exchangeTradeoff && oxygenLimited &&
-            finiteLightCompetition && oxygenConserved;
+            landDiagnostic && orderInvariant && brokenEdgeBlocks && exchangeTradeoff && oxygenLimited && demandMetabolism &&
+            finiteLightCompetition && sharedFounderBudget && oxygenConserved && mechanics.Passed && geometryContract;
 
         Console.WriteLine(
             $"verify seed={options.Seed} steps={options.Steps} ancestors={options.Ancestors}");
@@ -137,6 +205,15 @@ internal static class HeadlessProgram
         Console.WriteLine(
             $"movement={movementPaid} average_speed={a.AverageSpeed:F6} " +
             $"movement_energy={a.CumulativeMovementEnergy:F6}");
+        Console.WriteLine(
+            $"phase2b={mechanics.Passed} geometry={geometryContract} " +
+            $"shape_only_single={mechanics.SingleRegionDisplacement:E3} zero_activation={mechanics.ZeroActuationDisplacement:E3} shape_only_reciprocal={mechanics.ReciprocalDisplacement:E3} " +
+            $"shape_only_multi={mechanics.MultiRegionDisplacement:E3} ground={mechanics.GroundSupportedDisplacement:E3} unsupported={mechanics.UnsupportedDisplacement:E3} weak_pose_delta={mechanics.WeakLinkPoseDifference:E3} " +
+            $"work={mechanics.EnergySpent:E3} connection_load={mechanics.ConnectionLoad:E3} " +
+            $"internal_residual={mechanics.MaximumInternalResidual:E3} balance_residual={mechanics.MaximumBalanceResidual:E3}");
+        Console.WriteLine($"active_surface_sphere={mechanics.ActiveSurfaceSphereDisplacement:F6} no_energy={mechanics.UnpoweredSurfaceDisplacement:E3} sphere_sections_positive={mechanics.PositiveSphereSections}");
+        Console.WriteLine($"demand_limited_metabolism={demandMetabolism}");
+        Console.WriteLine($"shared_founder_matter_budget={sharedFounderBudget}");
         Console.WriteLine(
             $"aquatic_initial={initiallyAquatic} depth_legal={depthLegal} no_water_rejected={noWaterRejected} " +
             $"depth_contact={depthAwareContact} water_land_mobility={mediumDifference} " +
@@ -312,6 +389,22 @@ internal static class HeadlessProgram
             low.OxygenConsumed == 0 && low.SubstrateConsumed > 0;
     }
 
+    private static bool VerifyDemandLimitedMetabolism(ulong seed)
+    {
+        SimulationConfig config = new() { EnvironmentGridSize = 16 };
+        Genome genome = Genome.CreateAncestor();
+        BilinearEnvironmentField environment = new(config, new DeterministicRandom(seed, 94));
+        DevelopingBody full = new(genome, config.CoreInitialMatter, 1, config.MaximumEnergy, 0.2, 0.2);
+        DevelopingBody hungry = new(genome, config.CoreInitialMatter, 1, 0, 0.2, 0.2);
+        RegionalMetabolismResult resting = RegionalPhysiology.ReactAndMaintain(full, genome, environment,
+            System.Numerics.Vector2.Zero, config, 1);
+        RegionalMetabolismResult working = RegionalPhysiology.ReactAndMaintain(hungry, genome, environment,
+            System.Numerics.Vector2.Zero, config, 1);
+        return resting.SubstrateConsumed == 0 && resting.OxygenConsumed == 0 &&
+            working.SubstrateConsumed > 0 && working.EnergyProduced > 0 &&
+            Math.Abs(resting.SubstrateConsumed + working.SubstrateConsumed - environment.TotalMetabolicWaste) < 1e-10;
+    }
+
     private static bool VerifyFiniteLightCompetition(ulong seed)
     {
         SimulationConfig config = new() { EnvironmentGridSize = 16 };
@@ -347,8 +440,62 @@ internal static class HeadlessProgram
     {
         Console.WriteLine("FORCED MUTATION DIAGNOSTIC (test mode; does not represent natural event rates)");
         bool passed = CheckForcedMutations(options.Seed, print: true);
+        passed &= CheckInheritedMorphology(options.Seed);
         Console.WriteLine(passed ? "DIAGNOSTIC PASS" : "DIAGNOSTIC FAIL");
         return passed ? 0 : 1;
+    }
+
+    private static bool CheckInheritedMorphology(ulong seed)
+    {
+        // Samples the ordinary inheritance path, not a survival/adaptation assay.
+        // Adult geometry shows inherited potential; real offspring still grow it.
+        Genome parent = Genome.CreateAncestor();
+        Genome frozen = new(parent.Regions, 0, parent.Metabolism, parent.ControllerNodes);
+        GenomeMutator mutator = new();
+        DeterministicRandom bodyRandom = new(seed, 301), controllerRandom = new(seed, 302);
+        DevelopingBody ancestorBody = MorphologyGenomeFactory.FullyDeveloped(parent);
+        BodyGeometry original = ancestorBody.Geometry;
+        int exact = 0, visual = 0, shape = 0, substantial = 0, topology = 0, capacityChanged = 0;
+        bool valid = true, freezeExact = true;
+        for (int index = 0; index < 2000; index++)
+        {
+            Genome child = mutator.Inherit(parent, bodyRandom, controllerRandom).Genome;
+            DevelopingBody developed = MorphologyGenomeFactory.FullyDeveloped(child);
+            BodyGeometry geometry = developed.Geometry;
+            BodyCache a = ancestorBody.Cache, b = developed.Cache;
+            if (Math.Abs(a.MatterUptakeSurface-b.MatterUptakeSurface)>1e-8 ||
+                Math.Abs(a.LightCaptureSurface-b.LightCaptureSurface)>1e-8 ||
+                Math.Abs(a.CatalyticSurface-b.CatalyticSurface)>1e-8 ||
+                Math.Abs(a.StorageCapacity-b.StorageCapacity)>1e-8 ||
+                Math.Abs(a.MaintenanceEnergyPerSecond-b.MaintenanceEnergyPerSecond)>1e-8 ||
+                Math.Abs(a.StructuralStiffness-b.StructuralStiffness)>1e-8 ||
+                Math.Abs(a.MaximumActivationEnergyPerSecond-b.MaximumActivationEnergyPerSecond)>1e-8)
+                capacityChanged++;
+            valid &= geometry.Finite && geometry.Connected;
+            if (child.Fingerprint == parent.Fingerprint) exact++;
+            if (geometry.GeometryKey != original.GeometryKey) visual++;
+            bool structural = child.Regions.Count != parent.Regions.Count ||
+                child.Regions.Any(g => parent.Regions.FirstOrDefault(p => p.RegionId == g.RegionId).ParentRegionId != g.ParentRegionId);
+            bool different = structural, noticeable = structural;
+            foreach (BodyGeometryRegion region in geometry.Regions)
+            {
+                BodyGeometryRegion source = original.Regions.FirstOrDefault(r => r.RegionId == region.RegionId);
+                if (source.StartRadius <= 0) continue;
+                different |= region with { Color = source.Color } != source;
+                noticeable |= Math.Abs(region.Length - source.Length) > 0.10 * (source.Length + 2 * source.StartRadius) ||
+                    Math.Abs(region.StartRadius / source.StartRadius - 1) > 0.10 ||
+                    Math.Abs(region.EndRadius / source.EndRadius - 1) > 0.10 ||
+                    Math.Abs(region.VerticalScale - source.VerticalScale) > 0.10 ||
+                    Math.Abs(region.Curvature - source.Curvature) > 0.10 ||
+                    Math.Abs(region.Angle - source.Angle) > 0.15;
+            }
+            if (different) shape++;
+            if (noticeable) substantial++;
+            if (structural) topology++;
+            freezeExact &= mutator.Inherit(frozen, bodyRandom, controllerRandom).Genome.Fingerprint == frozen.Fingerprint;
+        }
+        Console.WriteLine($"INHERITANCE SAMPLE (2000 independent births; adult potential, not natural selection): exact={exact} visual_keys={visual} shape={shape} substantial_shape={substantial} topology={topology} body_capacity_changes={capacityChanged} finite={valid} mutation_zero_exact={freezeExact}");
+        return valid && freezeExact && exact > 0 && shape > 0 && substantial > 0 && topology > 0 && capacityChanged > 0;
     }
 
     private static bool CheckForcedMutations(ulong seed, bool print)
@@ -456,6 +603,17 @@ internal static class HeadlessProgram
         return new SimulationWorld(config, options.Seed, options.Ancestors);
     }
 
+    private static bool VerifySharedFounderBudget(ulong seed)
+    {
+        SimulationConfig config=new(){ResourceBudgetReferenceAncestors=24};
+        SimulationWorld small=new(config,seed,24),observation=new(config,seed,300);
+        SimulationSnapshot a=small.CaptureSnapshot(),b=observation.CaptureSnapshot();
+        double transferred=(300-24)*(config.CoreInitialMatter+config.AncestorStoredMatter);
+        return a.AllFinite&&b.AllFinite&&Math.Abs(a.InitialMatter-b.InitialMatter)<1e-8&&
+            Math.Abs(a.EnvironmentMinerals-b.EnvironmentMinerals-transferred)<1e-8&&
+            Math.Abs(a.MatterError)<1e-8&&Math.Abs(b.MatterError)<1e-8;
+    }
+
     private static double MatterTolerance(double initialMatter) =>
         Math.Max(1e-8, Math.Abs(initialMatter) * 1e-10);
 
@@ -520,6 +678,11 @@ internal static class HeadlessProgram
         Console.WriteLine("NativeEpoch phase 2A regional exchange and transport simulation");
         Console.WriteLine("  --verify                 deterministic lifecycle and phase 2A mechanism invariants");
         Console.WriteLine("  --diagnose-mutations     force four mutation kinds in an explicit test mode");
+        Console.WriteLine("  --diagnose-ecology       track actual generations, reproductive bottlenecks and survival");
+        Console.WriteLine("  --diagnose-movement      check steering authority, 120 s exploration and low-energy rest");
+        Console.WriteLine("  --diagnose-competition   check occupied space, paid contact and finite food sharing");
+        Console.WriteLine("  --experiment-adaptation run three bounded natural-lineage paired assays");
+        Console.WriteLine("  --experiment-supplement run one fixed finite-resource common-garden supplement");
         Console.WriteLine("  --inspect-lineage <int>  print recent parent-child genome/body differences");
         Console.WriteLine("  --seed <uint64>          world seed (default 20260908)");
         Console.WriteLine("  --steps <int>            fixed 0.1 s steps (default 600)");
@@ -533,6 +696,8 @@ internal static class HeadlessProgram
     private sealed record Options(
         bool Verify,
         bool DiagnoseMutations,
+        bool ExperimentAdaptation,
+        bool ExperimentSupplement,
         bool ShowHelp,
         ulong Seed,
         int Steps,
@@ -547,6 +712,8 @@ internal static class HeadlessProgram
         {
             bool verify = false;
             bool diagnoseMutations = false;
+            bool experimentAdaptation = false;
+            bool experimentSupplement = false;
             bool showHelp = false;
             ulong seed = 20260908;
             int steps = 600;
@@ -567,6 +734,12 @@ internal static class HeadlessProgram
                         break;
                     case "--diagnose-mutations":
                         diagnoseMutations = true;
+                        break;
+                    case "--experiment-adaptation":
+                        experimentAdaptation = true;
+                        break;
+                    case "--experiment-supplement":
+                        experimentSupplement = true;
                         break;
                     case "--inspect-lineage":
                         inspectLineage = ParsePositiveInt(ReadValue(args, ref index, option), option);
@@ -604,7 +777,7 @@ internal static class HeadlessProgram
                 throw new ArgumentException("--verify requires --steps greater than zero.");
 
             return new Options(
-                verify, diagnoseMutations, showHelp, seed, steps, ancestors, reportEvery,
+                verify, diagnoseMutations, experimentAdaptation, experimentSupplement, showHelp, seed, steps, ancestors, reportEvery,
                 gridSize, worldSize, maxPopulation, inspectLineage);
         }
 

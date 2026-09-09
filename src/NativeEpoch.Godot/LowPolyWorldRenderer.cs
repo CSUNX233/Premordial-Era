@@ -20,6 +20,7 @@ public sealed partial class LowPolyWorldRenderer : Node3D
     private const int TerrainSegments = 48;
     private const int TerrainChunksPerAxis = 4;
     private const int DetailedRegionBudget = 20_000;
+    private const int NearContinuousSkinBudget = 8;
     // Stage 3 uses the simulation geometry scale directly. The full curved-body
     // volume/physics remap belongs to morphology checkpoint B.
     private const float OrganismVisualScale = 1.0f;
@@ -28,7 +29,21 @@ public sealed partial class LowPolyWorldRenderer : Node3D
     private MeshInstance3D _water = null!;
     private MultiMeshInstance3D _organisms = null!;
     private MeshInstance3D _selection = null!;
+    private MeshInstance3D _selectedSkin = null!;
+    private Skeleton3D _selectedSkeleton = null!;
+    private ulong _selectedSkinKey;
+    private BodyGeometry? _selectedRestGeometry;
+    private readonly List<NearSkinView> _nearSkins = [];
+    private readonly Dictionary<ulong, SkinTemplate> _skinCache = [];
+    private readonly Dictionary<ulong, PendingSkinBuild> _pendingSkinBuilds = [];
+    private readonly HashSet<ulong> _previousNearIds = [];
+    private readonly HashSet<ulong> _previousVisibleIds = [];
     private float _worldSize;
+    private long _lastSnapshotStep = -1;
+    private float _interpolationAlpha = 1f;
+    private OrganismPresentationState? _selectedPrevious;
+    private OrganismPresentationState? _selectedCurrent;
+    private bool _meshCommittedThisFrame;
 
     public override void _Ready()
     {
@@ -67,16 +82,28 @@ public sealed partial class LowPolyWorldRenderer : Node3D
             Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
             ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded
         };
-        _selection = new MeshInstance3D
+        ImmediateMesh selectionRing = new();
+        selectionRing.SurfaceBegin(Mesh.PrimitiveType.LineStrip, selectionMaterial);
+        const int ringSegments = 48;
+        for (int index = 0; index <= ringSegments; index++)
         {
-            Mesh = new BoxMesh
-            {
-                Size = Vector3.One,
-                Material = selectionMaterial
-            },
-            Visible = false
-        };
+            float angle = Mathf.Tau * index / ringSegments;
+            selectionRing.SurfaceAddVertex(new Vector3(MathF.Cos(angle), 0f, MathF.Sin(angle)));
+        }
+        selectionRing.SurfaceEnd();
+        _selection = new MeshInstance3D { Mesh = selectionRing, Visible = false };
         AddChild(_selection);
+        _selectedSkeleton = new Skeleton3D { Name = "SelectedBodySkeleton", Visible = false };
+        AddChild(_selectedSkeleton);
+        _selectedSkin = new MeshInstance3D { Visible = false, Skeleton = new NodePath("..") };
+        _selectedSkeleton.AddChild(_selectedSkin);
+        for (int index = 0; index < NearContinuousSkinBudget; index++)
+        {
+            Skeleton3D skeleton=new(){Visible=false};
+            MeshInstance3D mesh=new(){Visible=false,Skeleton=new NodePath("..")};
+            skeleton.AddChild(mesh);AddChild(skeleton);
+            _nearSkins.Add(new NearSkinView(skeleton,mesh));
+        }
     }
 
     public void BuildEnvironment(IEnvironmentField environment, float worldSize, HeatmapMode mode)
@@ -136,19 +163,38 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         _water.Position = Vector3.Zero;
     }
 
-    public int UpdateOrganisms(WorldPresentationSnapshot snapshot, ulong? selectedId)
+    public int UpdateOrganisms(WorldPresentationSnapshot snapshot, ulong? selectedId,
+        System.Numerics.Vector2? viewCenter = null)
     {
-        int totalRegions = snapshot.Organisms.Sum(organism => organism.Regions.Count);
+        bool poseAdvanced = snapshot.Statistics.StepIndex != _lastSnapshotStep;
+        _lastSnapshotStep = snapshot.Statistics.StepIndex;
+        if (poseAdvanced) _interpolationAlpha = 0f;
+        _meshCommittedThisFrame=false;
+        List<OrganismPresentationState> visibleOrganisms = VisibleOrganisms(snapshot, selectedId);
+        HashSet<ulong> requiredSkinKeys=visibleOrganisms
+            .Select(o=>o.VisualTemplateGeometry.GeometryKey).ToHashSet();
+        foreach(ulong stale in _pendingSkinBuilds
+                    .Where(pair=>pair.Value.Work.IsCompleted&&!requiredSkinKeys.Contains(pair.Key))
+                    .Select(pair=>pair.Key).ToArray())
+            _pendingSkinBuilds.Remove(stale);
+        bool selectedSkinReady=UpdateSelectedSkin(snapshot,selectedId,poseAdvanced);
+        HashSet<ulong> continuousSkinIds = UpdateNearSkins(
+            visibleOrganisms, selectedId, viewCenter, poseAdvanced,selectedSkinReady);
+        int totalRegions = visibleOrganisms.Sum(organism => organism.Regions.Count);
         UsesSimplifiedProxies = totalRegions > DetailedRegionBudget;
+        int selectedRegionCount = visibleOrganisms.Where(o => continuousSkinIds.Contains(o.Id))
+            .Sum(o => o.Regions.Count);
         int renderedCount = UsesSimplifiedProxies
-            ? snapshot.Organisms.Count + (selectedId is null ? 0 : GenomeValidator.MaximumRegions)
-            : totalRegions;
+            ? visibleOrganisms.Count + (selectedId is null ? 0 : GenomeValidator.MaximumRegions)
+            : totalRegions - selectedRegionCount;
         MultiMesh multimesh = _organisms.Multimesh;
         multimesh.InstanceCount = renderedCount;
         int instance = 0;
 
-        foreach (OrganismPresentationState organism in snapshot.Organisms)
+        foreach (OrganismPresentationState organism in visibleOrganisms)
         {
+            if (continuousSkinIds.Contains(organism.Id))
+                continue;
             float centerHeight = OrganismElevation(organism);
             double headingCosine = Math.Cos(organism.HeadingRadians);
             double headingSine = Math.Sin(organism.HeadingRadians);
@@ -184,9 +230,9 @@ public sealed partial class LowPolyWorldRenderer : Node3D
                 Basis basis = new Basis(
                     Vector3.Up,
                     -(float)(region.Angle + organism.HeadingRadians)).Scaled(new Vector3(
-                    (float)region.Width * OrganismVisualScale,
+                    (float)(region.Length+region.Width) * OrganismVisualScale,
                     thickness,
-                    (float)region.Length * OrganismVisualScale));
+                    (float)region.Width * OrganismVisualScale));
                 multimesh.SetInstanceTransform(instance, new Transform3D(basis, origin));
                 multimesh.SetInstanceColor(instance, new Color(
                     region.Color.X,
@@ -205,6 +251,248 @@ public sealed partial class LowPolyWorldRenderer : Node3D
     }
 
     public bool UsesSimplifiedProxies { get; private set; }
+    public long SkinMeshesBuilt { get; private set; }
+    public int VisibleOrganismCount { get; private set; }
+
+    private HashSet<ulong> UpdateNearSkins(IReadOnlyList<OrganismPresentationState> visibleOrganisms, ulong? selectedId,
+        System.Numerics.Vector2? viewCenter, bool poseAdvanced,bool selectedSkinReady)
+    {
+        HashSet<ulong> rendered = [];
+        int viewIndex = 0;
+        System.Numerics.Vector2 focus=viewCenter??new(_worldSize*0.5f,_worldSize*0.5f);
+        foreach (OrganismPresentationState organism in visibleOrganisms.Where(o=>o.Id!=selectedId)
+                     .OrderBy(o=>System.Numerics.Vector2.DistanceSquared(o.Position,focus)*
+                         (_previousNearIds.Contains(o.Id)?0.85f:1f)).Take(NearContinuousSkinBudget))
+        {
+            if(!TryGetSkinTemplate(organism,"世界近景个体",out SkinTemplate? template))continue;
+            SkinTemplate ready=template!;
+            NearSkinView view = _nearSkins[viewIndex++];
+            if(view.GeometryKey!=organism.VisualTemplateGeometry.GeometryKey)
+            {
+                ConfigureSkeleton(view.Skeleton,view.Mesh,ready.RestGeometry);
+                view.Mesh.Mesh=ready.Mesh;view.GeometryKey=organism.VisualTemplateGeometry.GeometryKey;
+                view.RestGeometry=ready.RestGeometry;
+                view.OrganismId=organism.Id;view.Previous=organism;view.Current=organism;
+            }
+            else if(view.OrganismId!=organism.Id||view.Current is null)
+            {view.OrganismId=organism.Id;view.Previous=organism;view.Current=organism;}
+            else if(poseAdvanced)
+            {view.Previous=view.Current;view.Current=organism;}
+            else view.Current=organism;
+            view.Mesh.MaterialOverride = new StandardMaterial3D
+            {
+                AlbedoColor = new Color(organism.Regions[0].Color.X, organism.Regions[0].Color.Y,
+                    organism.Regions[0].Color.Z), Roughness = 0.7f
+            };
+            ApplyInterpolatedPose(view.Skeleton,view.RestGeometry!,view.Previous!.Value,
+                view.Current!.Value,_interpolationAlpha);
+            view.Skeleton.Visible=true;view.Mesh.Visible = true;
+            rendered.Add(organism.Id);
+        }
+        for (; viewIndex<_nearSkins.Count; viewIndex++){_nearSkins[viewIndex].Skeleton.Visible=false;_nearSkins[viewIndex].Mesh.Visible=false;}
+        _previousNearIds.Clear();_previousNearIds.UnionWith(rendered);
+        if (selectedSkinReady&&selectedId is not null) rendered.Add(selectedId.Value);
+        return rendered;
+    }
+
+    private List<OrganismPresentationState> VisibleOrganisms(
+        WorldPresentationSnapshot snapshot, ulong? selectedId)
+    {
+        Camera3D? camera = GetViewport().GetCamera3D();
+        if (camera is null)
+        {
+            VisibleOrganismCount = snapshot.Organisms.Count;
+            return snapshot.Organisms.ToList();
+        }
+
+        Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
+        Rect2 guard = new(-viewportSize * 0.18f, viewportSize * 1.36f);
+        Rect2 retainedGuard = new(-viewportSize * 0.28f, viewportSize * 1.56f);
+        List<OrganismPresentationState> visible = new(Math.Min(snapshot.Organisms.Count, 512));
+        HashSet<ulong> nextVisible = [];
+        foreach (OrganismPresentationState organism in snapshot.Organisms)
+        {
+            Vector3 worldPosition = new(
+                organism.Position.X - (_worldSize * 0.5f), OrganismElevation(organism),
+                organism.Position.Y - (_worldSize * 0.5f));
+            bool selected = selectedId == organism.Id;
+            bool inFront = !camera.IsPositionBehind(worldPosition);
+            bool retained = _previousVisibleIds.Contains(organism.Id);
+            bool inGuard = inFront && (retained ? retainedGuard : guard)
+                .HasPoint(camera.UnprojectPosition(worldPosition));
+            if (!selected && !inGuard)
+                continue;
+            visible.Add(organism);
+            nextVisible.Add(organism.Id);
+        }
+        _previousVisibleIds.Clear();
+        _previousVisibleIds.UnionWith(nextVisible);
+        VisibleOrganismCount = visible.Count;
+        return visible;
+    }
+
+    private static void ConfigureSkeleton(Skeleton3D skeleton,MeshInstance3D mesh,BodyGeometry geometry)
+    {
+        skeleton.ClearBones();
+        foreach(BodyGeometryRegion region in geometry.Regions)
+        {int bone=skeleton.GetBoneCount();skeleton.AddBone($"region_{region.RegionId}");
+            skeleton.SetBoneRest(bone,new Transform3D(new Basis(Vector3.Up,-(float)region.Angle),new Vector3(region.Center.X,0,region.Center.Y)));}
+        mesh.Skin=skeleton.CreateSkinFromRestTransforms();
+    }
+
+    private void ApplyInterpolatedPose(Skeleton3D skeleton,BodyGeometry restGeometry,
+        OrganismPresentationState previous,OrganismPresentationState current,float alpha)
+    {
+        for(int index=0;index<restGeometry.Regions.Count;index++)
+        {
+            BodyGeometryRegion rest=restGeometry.Regions[index];
+            bool hasFrom=TryFindRegion(previous.Regions,rest.RegionId,out BodyVisualRegion from);
+            bool hasTo=TryFindRegion(current.Regions,rest.RegionId,out BodyVisualRegion to);
+            if(!hasFrom&&!hasTo)
+            {
+                skeleton.SetBonePosePosition(index,new Vector3(rest.Center.X,0,rest.Center.Y));
+                skeleton.SetBonePoseRotation(index,new Quaternion(Vector3.Up,-(float)rest.Angle));
+                skeleton.SetBonePoseScale(index,Vector3.Zero);
+                continue;
+            }
+            if(!hasFrom)
+                from=new BodyVisualRegion(to.RegionId,to.LocalCenter,to.Angle,0,0,0,to.Color);
+            if(!hasTo)
+                to=new BodyVisualRegion(from.RegionId,from.LocalCenter,from.Angle,0,0,0,from.Color);
+            float centerX=Mathf.Lerp(from.LocalCenter.X,to.LocalCenter.X,alpha);
+            float centerY=Mathf.Lerp(from.LocalCenter.Y,to.LocalCenter.Y,alpha);
+            double angle=from.Angle+NormalizeAngle(to.Angle-from.Angle)*alpha;
+            double length=Mathf.Lerp((float)from.Length,(float)to.Length,alpha);
+            double width=Mathf.Lerp((float)from.Width,(float)to.Width,alpha);
+            double thickness=Mathf.Lerp((float)from.Thickness,(float)to.Thickness,alpha);
+            skeleton.SetBonePosePosition(index,new Vector3(centerX,0,centerY));
+            skeleton.SetBonePoseRotation(index,new Quaternion(Vector3.Up,-(float)angle));
+            skeleton.SetBonePoseScale(index,new Vector3(
+                rest.Length<1e-6?1f:(float)(length/rest.Length),
+                (float)(thickness/Math.Max(1e-8,(rest.StartRadius+rest.EndRadius)*rest.VerticalScale)),
+                (float)(width/Math.Max(1e-8,rest.StartRadius+rest.EndRadius))));
+        }
+        float worldX=Mathf.Lerp(previous.Position.X,current.Position.X,alpha)-(_worldSize*0.5f);
+        float worldZ=Mathf.Lerp(previous.Position.Y,current.Position.Y,alpha)-(_worldSize*0.5f);
+        float elevation=Mathf.Lerp(OrganismElevation(previous),OrganismElevation(current),alpha);
+        double heading=previous.HeadingRadians+
+            NormalizeAngle(current.HeadingRadians-previous.HeadingRadians)*alpha;
+        skeleton.Position=new Vector3(worldX,elevation,worldZ);
+        skeleton.Rotation=new Vector3(0,-(float)heading,0);
+    }
+
+    private static bool TryFindRegion(IReadOnlyList<BodyVisualRegion> regions,int regionId,
+        out BodyVisualRegion found)
+    {
+        foreach(BodyVisualRegion region in regions)
+        {
+            if(region.RegionId!=regionId)continue;
+            found=region;
+            return true;
+        }
+        found=default;
+        return false;
+    }
+
+    private static double NormalizeAngle(double angle)
+    {
+        while(angle>Math.PI)angle-=Math.Tau;
+        while(angle<-Math.PI)angle+=Math.Tau;
+        return angle;
+    }
+
+    private sealed class NearSkinView(Skeleton3D skeleton,MeshInstance3D mesh)
+    {public Skeleton3D Skeleton{get;}=skeleton;public MeshInstance3D Mesh{get;}=mesh;public ulong GeometryKey{get;set;} public BodyGeometry? RestGeometry{get;set;} public ulong OrganismId{get;set;} public OrganismPresentationState? Previous{get;set;} public OrganismPresentationState? Current{get;set;}}
+
+    private sealed record SkinTemplate(ArrayMesh Mesh,BodyGeometry RestGeometry);
+    private sealed record PendingSkinBuild(OrganicShapeParameters Parameters,BodyGeometry RestGeometry,
+        Task<OrganicMeshData> Work);
+
+    private bool TryGetSkinTemplate(OrganismPresentationState organism,string name,out SkinTemplate? template)
+    {
+        ulong key=organism.VisualTemplateGeometry.GeometryKey;
+        if(_skinCache.TryGetValue(key,out template))return true;
+        if(_pendingSkinBuilds.TryGetValue(key,out PendingSkinBuild? pending))
+        {
+            if(!pending.Work.IsCompleted||_meshCommittedThisFrame)return false;
+            if(!pending.Work.IsCompletedSuccessfully)
+            {
+                _pendingSkinBuilds.Remove(key);
+                GD.PushError($"连续表皮后台构建失败: {pending.Work.Exception?.GetBaseException().Message}");
+                return false;
+            }
+            GeneratedOrganicMesh built=OrganicMeshGenerator.BuildMesh(pending.Work.Result,pending.Parameters,false);
+            template=new SkinTemplate(built.Solid,pending.RestGeometry);
+            if(_skinCache.Count>=64)_skinCache.Remove(_skinCache.Keys.First());
+            _skinCache[key]=template;
+            _pendingSkinBuilds.Remove(key);
+            _meshCommittedThisFrame=true;
+            SkinMeshesBuilt++;
+            return true;
+        }
+        if(_pendingSkinBuilds.Count<4)
+        {
+            OrganicShapeParameters parameters=OrganicMeshGenerator.FromGeometry(
+                name,organism.GenomeFingerprint,organism.VisualTemplateGeometry,null,false);
+            _pendingSkinBuilds[key]=new PendingSkinBuild(parameters,organism.VisualTemplateGeometry,
+                Task.Run(()=>OrganicMeshGenerator.GenerateData(parameters)));
+        }
+        template=null;
+        return false;
+    }
+
+    private bool UpdateSelectedSkin(WorldPresentationSnapshot snapshot, ulong? selectedId,bool poseAdvanced)
+    {
+        OrganismPresentationState? found = selectedId is null
+            ? null : snapshot.Organisms.FirstOrDefault(o => o.Id == selectedId.Value);
+        if (found is null || found.Value.Id == 0)
+        {
+            _selectedSkin.Visible = false;
+            _selectedSkeleton.Visible = false;
+            _selectedPrevious=null;_selectedCurrent=null;
+            return false;
+        }
+        OrganismPresentationState organism = found.Value;
+        ulong geometryKey = organism.VisualTemplateGeometry.GeometryKey;
+        if (geometryKey != _selectedSkinKey)
+        {
+            if(!TryGetSkinTemplate(organism,"世界选中个体",out SkinTemplate? template))
+            {
+                _selectedSkin.Visible=false;_selectedSkeleton.Visible=false;
+                return false;
+            }
+            SkinTemplate ready=template!;
+            ConfigureSkeleton(_selectedSkeleton,_selectedSkin,ready.RestGeometry);
+            _selectedSkin.Mesh = ready.Mesh;
+            _selectedSkin.MaterialOverride = new StandardMaterial3D
+            {
+                AlbedoColor = new Color(organism.Regions[0].Color.X, organism.Regions[0].Color.Y,
+                    organism.Regions[0].Color.Z), Roughness = 0.65f
+            };
+            _selectedSkinKey = geometryKey;
+            _selectedRestGeometry = ready.RestGeometry;
+            _selectedPrevious=organism;_selectedCurrent=organism;
+        }
+        else if(_selectedCurrent is null||_selectedCurrent.Value.Id!=organism.Id)
+        {_selectedPrevious=organism;_selectedCurrent=organism;}
+        else if(poseAdvanced){_selectedPrevious=_selectedCurrent;_selectedCurrent=organism;}
+        else _selectedCurrent=organism;
+        ApplyInterpolatedPose(_selectedSkeleton,_selectedRestGeometry??organism.VisualTemplateGeometry,
+            _selectedPrevious!.Value,_selectedCurrent!.Value,_interpolationAlpha);
+        _selectedSkeleton.Visible = true;
+        _selectedSkin.Visible = true;
+        return true;
+    }
+
+    public void InterpolateContinuousSkins(float alpha)
+    {
+        _interpolationAlpha=Math.Clamp(alpha,0f,1f);
+        foreach(NearSkinView view in _nearSkins)
+            if(view.Skeleton.Visible&&view.RestGeometry is not null&&view.Previous is not null&&view.Current is not null)
+                ApplyInterpolatedPose(view.Skeleton,view.RestGeometry,view.Previous.Value,view.Current.Value,_interpolationAlpha);
+        if(_selectedSkeleton.Visible&&_selectedRestGeometry is not null&&_selectedPrevious is not null&&_selectedCurrent is not null)
+            ApplyInterpolatedPose(_selectedSkeleton,_selectedRestGeometry,_selectedPrevious.Value,_selectedCurrent.Value,_interpolationAlpha);
+    }
 
     private void UpdateSelection(WorldPresentationSnapshot snapshot, ulong? selectedId)
     {
@@ -230,12 +518,12 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         }
 
         OrganismPresentationState organism = selected.Value;
-        float diameter = Math.Max(2.0f, (float)organism.Body.BoundingRadius * OrganismVisualScale * 2.6f);
+        float radius = Math.Max(0.75f, (float)organism.Body.BoundingRadius * OrganismVisualScale * 1.45f);
         _selection.Position = new Vector3(
             organism.Position.X - (_worldSize * 0.5f),
-            OrganismElevation(organism),
+            OrganismElevation(organism) + Math.Max(0.08f, (float)organism.Body.BoundingRadius * 0.16f),
             organism.Position.Y - (_worldSize * 0.5f));
-        _selection.Scale = new Vector3(diameter, 0.08f, diameter);
+        _selection.Scale = new Vector3(radius, 1f, radius);
         _selection.Visible = true;
     }
 

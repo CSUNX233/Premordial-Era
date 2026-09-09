@@ -23,6 +23,7 @@ public sealed partial class Stage3Main : Node3D
     private double _timeScale = 1.0;
     private double _stepAccumulator;
     private double _renderAccumulator;
+    private double _poseInterpolationElapsed;
     private double _statisticsAccumulator;
     private double _inspectorAccumulator;
     private double _rateWindowSeconds;
@@ -57,8 +58,16 @@ public sealed partial class Stage3Main : Node3D
         ConnectHudCommands();
         ResetWorld(24, preRunSteps: 0, "少量祖先 24");
         UpdateCameraTransform();
-        if (OS.GetCmdlineUserArgs().Contains("--stage3-smoke"))
+        if (OS.GetCmdlineUserArgs().Contains("--stage3-profile-small"))
+            RunStage2PerformanceProfile(24, 0);
+        else if (OS.GetCmdlineUserArgs().Contains("--stage3-profile-1000"))
+            RunStage2PerformanceProfile(1000, 80);
+        else if (OS.GetCmdlineUserArgs().Contains("--stage3-profile"))
+            RunStage2PerformanceProfile(300, 80);
+        else if (OS.GetCmdlineUserArgs().Contains("--stage3-smoke"))
             RunHeadlessInteractionSmoke();
+        else if (OS.GetCmdlineUserArgs().Contains("--capture-stage2-world"))
+            CaptureSelectedWorldFrame();
     }
 
     public override void _Process(double delta)
@@ -88,12 +97,16 @@ public sealed partial class Stage3Main : Node3D
         }
 
         _renderAccumulator += delta;
+        _poseInterpolationElapsed += delta;
         double renderInterval = _timeScale >= 100.0 ? 0.20 : 0.10;
         if (_renderAccumulator >= renderInterval)
         {
             RefreshSnapshotAndWorld();
             _renderAccumulator = 0.0;
+            _poseInterpolationElapsed = 0.0;
         }
+        _worldRenderer.InterpolateContinuousSkins(
+            (float)Math.Clamp(_poseInterpolationElapsed / renderInterval, 0.0, 1.0));
 
         _statisticsAccumulator += delta;
         if (_statisticsAccumulator >= 0.50)
@@ -219,7 +232,10 @@ public sealed partial class Stage3Main : Node3D
         {
             WorldSize = 512f,
             EnvironmentGridSize = 128,
-            MaxPopulation = 5_000
+            MaxPopulation = 5_000,
+            // Default-seed late samples at 1800/2100/2400 s: 932/929/975.
+            InitialMineralScale = 1.0,
+            ResourceBudgetReferenceAncestors = 24
         };
         _world = new SimulationWorld(config, DefaultSeed, ancestors);
         if (preRunSteps > 0)
@@ -231,7 +247,7 @@ public sealed partial class Stage3Main : Node3D
         RefreshSnapshotAndWorld();
         RefreshStatistics();
         RefreshInspector();
-        _hud.UpdateStatus($"已载入 {label}。初始共同祖先只投放在有光浅水层；深度与生命周期继续结算。");
+        _hud.UpdateStatus($"已载入 {label}。资源承载目标约 1000 只，随演化与环境变化；不同起始数量共用同一物质预算。");
         UpdateModeLabel();
     }
 
@@ -384,7 +400,9 @@ public sealed partial class Stage3Main : Node3D
     private void RefreshSnapshotAndWorld()
     {
         _snapshot = _world.CapturePresentationSnapshot();
-        _renderedRegions = _worldRenderer.UpdateOrganisms(_snapshot, _selectedId);
+        _renderedRegions = _worldRenderer.UpdateOrganisms(_snapshot, _selectedId,
+            new System.Numerics.Vector2(_cameraTarget.X + _world.Config.WorldSize*0.5f,
+                _cameraTarget.Z + _world.Config.WorldSize*0.5f));
         if (_selectedId is not null && !_snapshot.Organisms.Any(organism => organism.Id == _selectedId.Value))
             _selectedId = null;
     }
@@ -392,11 +410,18 @@ public sealed partial class Stage3Main : Node3D
     private void RefreshStatistics()
     {
         SimulationSnapshot stats = _snapshot.Statistics;
+        int livingGeneration = 0;
+        int crowdedPopulation = 0;
+        foreach (OrganismPresentationState organism in _snapshot.Organisms)
+        {
+            livingGeneration = Math.Max(livingGeneration, organism.Generation);
+            if (organism.ContactPressure > 0.05) crowdedPopulation++;
+        }
         _hud.UpdateStatistics(
             $"步 {stats.StepIndex:N0} · {stats.SimulatedSeconds:F1}s · 存活 {stats.Population:N0} · " +
-            $"出生/死亡 {stats.CumulativeBirths:N0}/{stats.CumulativeDeaths:N0}\n" +
+            $"出生/死亡 {stats.CumulativeBirths:N0}/{stats.CumulativeDeaths:N0} · 存活最高第 {livingGeneration} 代\n" +
             $"死亡 损伤/夭折/衰老 {stats.DamageDeaths:N0}/{stats.JuvenileDeaths:N0}/{stats.SenescenceDeaths:N0} · " +
-            $"生物量 {stats.OrganismBodyMatter:F1} · 环境矿物 {stats.EnvironmentMinerals:F1} · 残骸/废物 {stats.EnvironmentDetritus + stats.EnvironmentMetabolicWaste:F1}\n" +
+            $"生物量 {stats.OrganismBodyMatter:F1} · 环境矿物 {stats.EnvironmentMinerals:F1} · 残骸/废物 {stats.EnvironmentDetritus + stats.EnvironmentMetabolicWaste:F1} · 拥挤 {crowdedPopulation:N0}\n" +
             $"基因组 {stats.GenomeCount:N0} · 身体区域 {stats.TotalBodyRegions:N0}（渲染实例 {_renderedRegions:N0}" +
             $"{(_worldRenderer.UsesSimplifiedProxies ? "，远景代理" : "，完整区域")}） · " +
             $"均速 {stats.AverageSpeed:F2} · 目标 {_timeScale:0}× / 实际 {_achievedScale:0.0}× · " +
@@ -428,17 +453,31 @@ public sealed partial class Stage3Main : Node3D
         }
 
         OrganismPresentationState organism = selected.Value;
+        string interaction = organism.InteractionState switch
+        {
+            InteractionState.Contesting => "争夺位置",
+            InteractionState.Yielding => "接触退让",
+            _ => "无接触互动"
+        };
+        string opponent = organism.InteractionOpponentId == 0 ? "无" : organism.InteractionOpponentId.ToString();
+        string foodSatisfaction = organism.ResourceDemandLastStep > 1e-12
+            ? $"{organism.ResourceSatisfaction:P0}（需求 {organism.ResourceDemandLastStep:F4}）"
+            : "无摄取需求";
         string regionalInventory = string.Join("\n", organism.RegionInventories
             .OrderBy(region => region.RegionId)
             .Take(6)
             .Select(region =>
                 $"  区 {region.RegionId}: 结构 {region.Matter:F3} / 底物 {region.Substrate:F3} / 氧 {region.Oxygen:F4} / 水 {region.Water:F3} / 能 {region.Energy:F3}"));
         _hud.UpdateInspector(
-            $"ID {organism.Id} · 亲代 {organism.ParentId}\n" +
+            $"ID {organism.Id} · 亲代 {organism.ParentId} · 第 {organism.Generation} 代\n" +
             $"基因组 {organism.GenomeId} · {organism.GenomeFingerprint:X16}\n" +
             $"基因区域 {organism.GenomeRegionCount} · 当前身体区域 {organism.Regions.Count}\n" +
             $"年龄 {organism.AgeSeconds:F1}s · 成熟 {organism.Maturity:P1} · 发育 {organism.DevelopmentCompletion:P1}\n" +
             $"能量 {organism.Energy:F3} · 储存物质 {organism.StoredMatter:F3} · 繁殖冷却 {organism.ReproductionCooldownSeconds:F1}s\n" +
+            $"探索倾向 {organism.ExplorationDrive:P0} · 食物信号变化 {organism.ForagingTrend:+0.000;-0.000;0.000}\n" +
+            $"接触压力 {organism.ContactPressure:P1} · 接触邻居 {organism.ContactNeighborCount}\n" +
+            $"互动 {interaction} · 对方 ID {opponent} · 争位强度 {organism.InteractionIntensity:P1}\n" +
+            $"本步食物需求满足 {foodSatisfaction}\n" +
             $"身体物质 {organism.Body.TotalMatter:F3} · 质量 {organism.Body.PhysicalMass:F3} · 半径 {organism.Body.BoundingRadius:F3}\n" +
             $"摄光面 {organism.Body.LightCaptureSurface:F3} · 摄取面 {organism.Body.MatterUptakeSurface:F3} · 维护 {organism.Body.MaintenanceEnergyPerSecond:F3}/s\n" +
             $"介质 {(organism.Immersion >= 0.8 ? "水中" : organism.Immersion > 0.05 ? "水线" : "陆地")} · 个体深度 {organism.Depth:F2}/{organism.Environment.WaterDepth:F2} · 浸没 {organism.Immersion:P0}\n" +
@@ -449,8 +488,9 @@ public sealed partial class Stage3Main : Node3D
             $"环境：海底 {organism.Environment.TerrainHeight:F2} · 压力 {organism.Environment.Pressure:F3} · 光 {organism.Environment.Light:F3}\n" +
             $"溶解氧可用度 {organism.Environment.DissolvedOxygenAvailability:F3} · 空气氧可用度 {organism.Environment.AirOxygenAvailability:F3}（均为各介质内部无量纲势）\n" +
             $"温度 {organism.Environment.Temperature:F3} · 矿物 {organism.Environment.Minerals:F3} · 代谢废物 {organism.Environment.MetabolicWaste:F3}\n" +
-            $"速度 ({organism.Velocity.X:F2}, {organism.Velocity.Y:F2}) · 自推进 ({organism.Body.PropulsionVector.X:F3}, {organism.Body.PropulsionVector.Y:F3})\n" +
-            "2A 提示：当前移动仍是临时聚合自推进；局部连接传力将在 2B 验收门实现");
+            $"速度 ({organism.Velocity.X:F2}, {organism.Velocity.Y:F2}) · 局部反力 ({organism.LocalActuationForce.X:F3}, {organism.LocalActuationForce.Y:F3}) · 力矩 {organism.ActuationTorque:F3}\n" +
+            $"控制输出 收缩 {organism.ControllerOutputs.ContractionActivation:F2} / 通透 {organism.ControllerOutputs.PermeabilityGate:F2} / 分泌 {organism.ControllerOutputs.SecretionActivation:F2}\n" +
+            "身体形变与活性表面驱动均消耗局部能量；低能量时减少探索。");
     }
 
     private void UpdateModeLabel()
@@ -711,6 +751,163 @@ public sealed partial class Stage3Main : Node3D
             $"aquatic_depth={aquaticDepthValid} oxygen_budget={oxygenBudget} " +
             $"matter_error={statistics.MatterError:E6} oxygen_error={statistics.OxygenError:E6}");
         GetTree().Quit(passed ? 0 : 1);
+    }
+
+    private async void CaptureSelectedWorldFrame()
+    {
+        ResetWorld(300, 80, "观察负载 300（截图）");
+        _paused = true;
+        OrganismPresentationState selected = _snapshot.Organisms[0];
+        _selectedId = selected.Id;
+        _cameraTarget = new Vector3(
+            selected.Position.X - (_world.Config.WorldSize * 0.5f),
+            LowPolyWorldRenderer.OrganismElevation(selected),
+            selected.Position.Y - (_world.Config.WorldSize * 0.5f));
+        _cameraPitch = -0.10f;
+        _cameraDistance = Math.Max(2.8f, (float)selected.Body.BoundingRadius * 4.0f);
+        UpdateCameraTransform();
+        RefreshSnapshotAndWorld();
+        RefreshStatistics();
+        RefreshInspector();
+        UpdateModeLabel();
+
+        for (int frame = 0; frame < 6; frame++)
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+
+        string directory = ProjectSettings.GlobalizePath("res://artifacts");
+        DirAccess.MakeDirRecursiveAbsolute(directory);
+        string path = System.IO.Path.Combine(directory, "phase2-selected-organism.png");
+        Error error = GetViewport().GetTexture().GetImage().SavePng(path);
+        GD.Print($"CAPTURE_STAGE2_WORLD {(error == Error.Ok ? "PASS" : "FAIL")} path={path} error={error}");
+        GetTree().Quit(error == Error.Ok ? 0 : 1);
+    }
+
+    private async void RunStage2PerformanceProfile(int ancestors, int preRunSteps)
+    {
+        ResetWorld(ancestors, preRunSteps, $"性能剖面 {ancestors}");
+        _paused = true;
+        for (int frame = 0; frame < 12; frame++)
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+
+        const int cycles = 30;
+        long allocationStart = GC.GetTotalAllocatedBytes(true);
+        long meshBuildStart = _worldRenderer.SkinMeshesBuilt;
+        _world.PerformanceMetrics.Reset();
+        _world.CollectPerformanceMetrics = true;
+        double stepMilliseconds = 0, snapshotMilliseconds = 0, renderMilliseconds = 0;
+        long stepAllocated = 0, snapshotAllocated = 0, renderAllocated = 0;
+        for (int cycle = 0; cycle < cycles; cycle++)
+        {
+            long categoryAllocation = GC.GetAllocatedBytesForCurrentThread();
+            long started = System.Diagnostics.Stopwatch.GetTimestamp();
+            _world.Step();
+            stepMilliseconds += System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            stepAllocated += GC.GetAllocatedBytesForCurrentThread() - categoryAllocation;
+            categoryAllocation = GC.GetAllocatedBytesForCurrentThread();
+            started = System.Diagnostics.Stopwatch.GetTimestamp();
+            _snapshot = _world.CapturePresentationSnapshot();
+            snapshotMilliseconds += System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            snapshotAllocated += GC.GetAllocatedBytesForCurrentThread() - categoryAllocation;
+            categoryAllocation = GC.GetAllocatedBytesForCurrentThread();
+            started = System.Diagnostics.Stopwatch.GetTimestamp();
+            _renderedRegions = _worldRenderer.UpdateOrganisms(_snapshot, _selectedId,
+                new System.Numerics.Vector2(_cameraTarget.X + _world.Config.WorldSize * 0.5f,
+                    _cameraTarget.Z + _world.Config.WorldSize * 0.5f));
+            renderMilliseconds += System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            renderAllocated += GC.GetAllocatedBytesForCurrentThread() - categoryAllocation;
+        }
+        long allocated = GC.GetTotalAllocatedBytes(false) - allocationStart;
+        _world.CollectPerformanceMetrics = false;
+        long meshesBuilt = _worldRenderer.SkinMeshesBuilt - meshBuildStart;
+
+        ResetWorld(ancestors, preRunSteps, $"1× 帧采样 {ancestors}");
+        OrganismPresentationState trackedStart = _snapshot.Organisms[0];
+        _selectedId = trackedStart.Id;
+        RefreshSnapshotAndWorld();
+        _paused = false;
+        for (int frame = 0; frame < 30; frame++)
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        List<double> frameTimes = new(4096);
+        long previous = System.Diagnostics.Stopwatch.GetTimestamp();
+        long samplingStarted = previous;
+        long firstStep = _world.StepIndex;
+        long steadyMeshStart = _worldRenderer.SkinMeshesBuilt;
+        trackedStart = _snapshot.Organisms.First(organism => organism.Id == trackedStart.Id);
+        ulong activeId=0;int activeRegionId=-1;
+        double activeAngleMin=double.PositiveInfinity,activeAngleMax=double.NegativeInfinity;
+        double activeLengthMin=double.PositiveInfinity,activeLengthMax=double.NegativeInfinity;
+        double activeMatterMin=double.PositiveInfinity,activeMatterMax=double.NegativeInfinity;
+        System.Numerics.Vector2 activeStartPosition=default,activeEndPosition=default;
+        double samplingDuration=ancestors<=24?10.0:30.0;
+        while (System.Diagnostics.Stopwatch.GetElapsedTime(samplingStarted).TotalSeconds < samplingDuration)
+        {
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            frameTimes.Add(System.Diagnostics.Stopwatch.GetElapsedTime(previous, now).TotalMilliseconds);
+            previous = now;
+            if(System.Diagnostics.Stopwatch.GetElapsedTime(samplingStarted).TotalSeconds>=samplingDuration-10.0)
+            {
+                if(activeId==0)
+                {
+                    OrganismPresentationState candidate=_snapshot.Organisms
+                        .Where(o=>o.Maturity>=0.95&&o.Regions.Count>1)
+                        .OrderByDescending(o=>o.Maturity).ThenBy(o=>o.Id).FirstOrDefault();
+                    if(candidate.Id!=0)
+                    {
+                        activeId=candidate.Id;
+                        activeRegionId=candidate.RegionInventories.OrderByDescending(r=>r.Activation)
+                            .ThenBy(r=>r.RegionId).First().RegionId;
+                        activeStartPosition=candidate.Position;
+                    }
+                }
+                OrganismPresentationState active=_snapshot.Organisms.FirstOrDefault(o=>o.Id==activeId);
+                if(active.Id!=0)
+                {
+                    BodyVisualRegion region=active.Regions.First(r=>r.RegionId==activeRegionId);
+                    activeAngleMin=Math.Min(activeAngleMin,region.Angle);activeAngleMax=Math.Max(activeAngleMax,region.Angle);
+                    activeLengthMin=Math.Min(activeLengthMin,region.Length);activeLengthMax=Math.Max(activeLengthMax,region.Length);
+                    activeMatterMin=Math.Min(activeMatterMin,active.Body.TotalMatter);activeMatterMax=Math.Max(activeMatterMax,active.Body.TotalMatter);
+                    activeEndPosition=active.Position;
+                }
+            }
+        }
+        frameTimes.Sort();
+        double sampledSeconds = System.Diagnostics.Stopwatch.GetElapsedTime(samplingStarted).TotalSeconds;
+        double averageFrame = frameTimes.Average();
+        double p95 = frameTimes[(int)(frameTimes.Count * 0.95)];
+        OrganismPresentationState trackedEnd = _snapshot.Organisms.First(organism => organism.Id == trackedStart.Id);
+        double displacement = System.Numerics.Vector2.Distance(trackedStart.Position, trackedEnd.Position);
+        double poseDelta = trackedStart.Regions.Join(trackedEnd.Regions,
+            before => before.RegionId, after => after.RegionId,
+            (before, after) => System.Numerics.Vector2.Distance(before.LocalCenter, after.LocalCenter) +
+                Math.Abs(before.Length - after.Length) + Math.Abs(before.Angle - after.Angle)).DefaultIfEmpty().Max();
+        long sampledSteps = _world.StepIndex - firstStep;
+        int visibleFacing=_worldRenderer.VisibleOrganismCount;
+        Vector3 towardTarget=(_cameraTarget-_camera.Position).Normalized();
+        _camera.LookAt(_camera.Position-towardTarget*100f,Vector3.Up);
+        RefreshSnapshotAndWorld();
+        await ToSignal(GetTree(),SceneTree.SignalName.ProcessFrame);
+        int visibleAway=_worldRenderer.VisibleOrganismCount;
+        GD.Print($"STAGE2_PROFILE population={_snapshot.Statistics.Population} cycles={cycles} " +
+            $"step_ms={stepMilliseconds / cycles:F3} snapshot_ms={snapshotMilliseconds / cycles:F3} " +
+            $"render_submit_ms={renderMilliseconds / cycles:F3} allocated_mb={allocated / 1048576.0:F2} " +
+            $"alloc_step_kb={stepAllocated / cycles / 1024.0:F1} alloc_snapshot_kb={snapshotAllocated / cycles / 1024.0:F1} " +
+            $"alloc_render_kb={renderAllocated / cycles / 1024.0:F1} " +
+            $"parts_ms={_world.PerformanceMetrics.EnvironmentMilliseconds/cycles:F2}/" +
+            $"{_world.PerformanceMetrics.SeparationMilliseconds/cycles:F2}/" +
+            $"{_world.PerformanceMetrics.ExchangeMilliseconds/cycles:F2}/" +
+            $"{_world.PerformanceMetrics.ControlTransportMilliseconds/cycles:F2}/" +
+            $"{_world.PerformanceMetrics.MechanicsMilliseconds/cycles:F2}/" +
+            $"{_world.PerformanceMetrics.MetabolismGrowthMilliseconds/cycles:F2} " +
+            $"skin_meshes_built={meshesBuilt} frame_avg_ms={averageFrame:F3} frame_p95_ms={p95:F3} " +
+            $"frame_max_ms={frameTimes[^1]:F3} sampled_frames={frameTimes.Count} sampled_steps={sampledSteps} " +
+            $"actual_scale={sampledSteps * FixedDelta / sampledSeconds:F3}x steady_mesh_builds={_worldRenderer.SkinMeshesBuilt-steadyMeshStart} " +
+            $"visible={visibleFacing} cull_visible_away={visibleAway} tracked_displacement={displacement:F5} pose_delta={poseDelta:F5} errors=0");
+        if(activeId!=0)
+            GD.Print($"STAGE2_ACTIVE organism={activeId} region={activeRegionId} angle_pp={activeAngleMax-activeAngleMin:F6} " +
+                $"length_pp={activeLengthMax-activeLengthMin:F6} matter_drift={activeMatterMax-activeMatterMin:F6} " +
+                $"displacement={System.Numerics.Vector2.Distance(activeStartPosition,activeEndPosition):F6} window_s=10");
+        GetTree().Quit();
     }
 
     private static string HeatmapName(HeatmapMode mode) => mode switch

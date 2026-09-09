@@ -1,4 +1,5 @@
 using Godot;
+using NativeEpoch.Simulation;
 
 namespace NativeEpoch.Godot;
 
@@ -7,7 +8,9 @@ public readonly record struct OrganicSegment(
     Vector3 End,
     float StartRadius,
     float EndRadius,
-    float VerticalScale = 1.0f);
+    float VerticalScale = 1.0f,
+    int BoneIndex = 0,
+    int ParentBoneIndex = -1);
 
 public sealed record OrganicShapeParameters(
     string DiagnosticName,
@@ -15,13 +18,33 @@ public sealed record OrganicShapeParameters(
     Color Color,
     OrganicSegment[] Segments,
     float ConnectionBlend,
-    int Resolution);
+    int Resolution,
+    ulong SourceGenomeFingerprint = 0,
+    double ExpectedVolume = 0,
+    bool SourceConnected = true);
 
 public sealed record GeneratedOrganicMesh(
     ArrayMesh Solid,
     ArrayMesh Wire,
     int TriangleCount,
-    Aabb Bounds);
+    Aabb Bounds,
+    double SampledVolume,
+    bool ClosedSurface,
+    int BoundaryEdges,
+    int NonManifoldEdges,
+    int ConnectedComponents);
+
+public sealed record OrganicMeshData(
+    Vector3[] TriangleVertices,
+    Vector3[] Normals,
+    int[] BoneIndices,
+    Aabb Bounds,
+    float Spacing,
+    double SampledVolume,
+    bool ClosedSurface,
+    int BoundaryEdges,
+    int NonManifoldEdges,
+    int ConnectedComponents);
 
 /// <summary>
 /// Diagnostic organic surface generator. Every sample is described by the same
@@ -41,7 +64,7 @@ public static class OrganicMeshGenerator
         { 0, 3, 7, 6 }, { 0, 7, 4, 6 }, { 0, 4, 5, 6 }
     };
 
-    public static GeneratedOrganicMesh Generate(OrganicShapeParameters parameters)
+    public static OrganicMeshData GenerateData(OrganicShapeParameters parameters)
     {
         if (parameters.Segments.Length == 0)
             throw new ArgumentException("A shape needs at least one skeleton segment.", nameof(parameters));
@@ -68,12 +91,15 @@ public static class OrganicMeshGenerator
         int resolution = Math.Clamp(parameters.Resolution, 10, 28);
         float spacing = longest / (resolution - 1);
         float[,,] field = new float[resolution, resolution, resolution];
+        int insideCells = 0;
         for (int z = 0; z < resolution; z++)
         for (int y = 0; y < resolution; y++)
         for (int x = 0; x < resolution; x++)
         {
             Vector3 point = minimum + new Vector3(x, y, z) * spacing;
             field[x, y, z] = SampleField(point, parameters);
+            if (field[x, y, z] >= 0f)
+                insideCells++;
         }
 
         List<Vector3> triangleVertices = [];
@@ -106,13 +132,220 @@ public static class OrganicMeshGenerator
             }
         }
 
-        ArrayMesh solid = BuildSolidMesh(triangleVertices, parameters, spacing);
-        ArrayMesh wire = BuildWireMesh(triangleVertices);
-        return new GeneratedOrganicMesh(
-            solid,
-            wire,
-            triangleVertices.Count / 3,
-            new Aabb(minimum, maximum - minimum));
+        OrientTriangles(triangleVertices, parameters);
+        SealBoundaryLoops(triangleVertices, spacing);
+        OrientTriangles(triangleVertices, parameters);
+
+        Vector3 meshCenter = (minimum + maximum) * 0.5f;
+        double meshVolume = MeshVolume(triangleVertices, meshCenter);
+        TopologyAnalysis topology = AnalyzeTopology(triangleVertices, spacing);
+        Vector3[] vertices=triangleVertices.ToArray();
+        Vector3[] normals=new Vector3[vertices.Length];
+        int[] bones=new int[vertices.Length];
+        float epsilon=spacing*0.45f;
+        for(int index=0;index<vertices.Length;index++)
+        {
+            Vector3 vertex=vertices[index];
+            Vector3 gradient=new(
+                SampleField(vertex+Vector3.Right*epsilon,parameters)-SampleField(vertex-Vector3.Right*epsilon,parameters),
+                SampleField(vertex+Vector3.Up*epsilon,parameters)-SampleField(vertex-Vector3.Up*epsilon,parameters),
+                SampleField(vertex+Vector3.Back*epsilon,parameters)-SampleField(vertex-Vector3.Back*epsilon,parameters));
+            normals[index]=gradient.LengthSquared()>1e-10f?-gradient.Normalized():Vector3.Up;
+            bones[index]=NearestBone(vertex,parameters);
+        }
+        return new OrganicMeshData(
+            vertices,normals,bones,
+            new Aabb(minimum, maximum - minimum),
+            spacing,
+            meshVolume,
+            topology.BoundaryEdges == 0 && topology.NonManifoldEdges == 0 && topology.ConnectedComponents == 1,
+            topology.BoundaryEdges, topology.NonManifoldEdges, topology.ConnectedComponents);
+    }
+
+    public static GeneratedOrganicMesh BuildMesh(OrganicMeshData data,OrganicShapeParameters parameters,
+        bool includeWire=true)
+    {
+        ArrayMesh solid=BuildSolidMesh(data);
+        ArrayMesh wire=includeWire?BuildWireMesh(data.TriangleVertices):new ArrayMesh();
+        return new GeneratedOrganicMesh(solid,wire,data.TriangleVertices.Length/3,data.Bounds,
+            data.SampledVolume,data.ClosedSurface,data.BoundaryEdges,data.NonManifoldEdges,
+            data.ConnectedComponents);
+    }
+
+    public static GeneratedOrganicMesh Generate(OrganicShapeParameters parameters)
+        =>BuildMesh(GenerateData(parameters),parameters);
+
+    public static OrganicShapeParameters FromBodyGeometry(
+        string name, Genome genome, BodyGeometry geometry, bool highDetail)
+        => FromGeometry(name, genome.Fingerprint, geometry, null, highDetail);
+
+    public static OrganicShapeParameters FromGeometry(
+        string name, ulong genomeFingerprint, BodyGeometry geometry,
+        IReadOnlyList<BodyVisualRegion>? pose, bool highDetail)
+    {
+        List<OrganicSegment> segments = [];
+        Dictionary<int, BodyVisualRegion>? posed = pose?.ToDictionary(region => region.RegionId);
+        int boneIndex = 0;
+        Dictionary<int,int> boneByRegion = geometry.Regions.Select((region,index)=>(region.RegionId,index))
+            .ToDictionary(pair=>pair.RegionId,pair=>pair.index);
+        foreach (BodyGeometryRegion region in geometry.Regions)
+        {
+            BodyVisualRegion? visual = posed is not null && posed.TryGetValue(region.RegionId, out BodyVisualRegion found)
+                ? found : null;
+            System.Numerics.Vector2 planarCenter = visual?.LocalCenter ?? region.Center;
+            double angle = visual?.Angle ?? region.Angle;
+            double length = visual?.Length ?? region.Length;
+            System.Numerics.Vector2 direction2 = new((float)Math.Cos(angle), (float)Math.Sin(angle));
+            Vector3 start = new(planarCenter.X - direction2.X*(float)length*0.5f, 0,
+                planarCenter.Y - direction2.Y*(float)length*0.5f);
+            Vector3 end = new(planarCenter.X + direction2.X*(float)length*0.5f, 0,
+                planarCenter.Y + direction2.Y*(float)length*0.5f);
+            Vector3 axis = end - start;
+            Vector3 side = axis.LengthSquared() > 1e-9f
+                ? new Vector3(-axis.Z, 0, axis.X).Normalized()
+                : Vector3.Back;
+            int curveSlices = length < 1e-5 ? 1 : 4;
+            int parentBone = region.ParentRegionId >= 0 ? boneByRegion[region.ParentRegionId] : -1;
+            for (int slice = 0; slice < curveSlices; slice++)
+            {
+                float t0 = slice / (float)curveSlices;
+                float t1 = (slice + 1) / (float)curveSlices;
+                Vector3 CurvePoint(float t) => start.Lerp(end, t) +
+                    side * (float)(region.Curvature * length * 0.28 * Math.Sin(Math.PI * t));
+                double radiusScale = visual is null ? 1.0 : visual.Value.Width /
+                    Math.Max(1e-8, region.StartRadius + region.EndRadius);
+                Vector3 sliceStart=CurvePoint(t0),sliceEnd=CurvePoint(t1);
+                Vector3 sliceDirection=(sliceEnd-sliceStart).Normalized();
+                float overlap=(float)(Math.Min(region.StartRadius,region.EndRadius)*radiusScale*0.18);
+                if(slice>0)sliceStart-=sliceDirection*overlap;
+                if(slice<curveSlices-1)sliceEnd+=sliceDirection*overlap;
+                segments.Add(new OrganicSegment(
+                    sliceStart, sliceEnd,
+                    Mathf.Lerp((float)(region.StartRadius*radiusScale), (float)(region.EndRadius*radiusScale), t0),
+                    Mathf.Lerp((float)(region.StartRadius*radiusScale), (float)(region.EndRadius*radiusScale), t1),
+                    (float)region.VerticalScale, boneIndex, parentBone));
+            }
+            boneIndex++;
+        }
+        double averageRoundness = geometry.Regions.Average(r => r.Roundness);
+        return new OrganicShapeParameters(name,
+            $"真实基因 {genomeFingerprint:X8} / 区域 {geometry.Regions.Count} / 圆润 {averageRoundness:F2}",
+            ToColor(geometry.Regions[0].Color), segments.ToArray(),
+            (float)(0.12 + 0.16 * averageRoundness), highDetail ? 24 :
+                (geometry.Regions.Count>1||geometry.Regions.Any(r=>Math.Abs(r.Curvature)>0.5)?24:
+                    geometry.Regions.All(r=>r.Length<1e-5)?22:20),
+            genomeFingerprint, geometry.ExpectedVolume, geometry.Connected);
+    }
+
+    private static Color ToColor(System.Numerics.Vector3 value) => new(value.X, value.Y, value.Z, 1f);
+
+    private readonly record struct TopologyAnalysis(int BoundaryEdges,int NonManifoldEdges,int ConnectedComponents);
+
+    private static TopologyAnalysis AnalyzeTopology(IReadOnlyList<Vector3> vertices, float spacing)
+    {
+        TopologyAnalysis best=new(int.MaxValue,int.MaxValue,0);
+        foreach(float factor in new[]{0.00001f,0.0001f,0.0005f,0.001f,0.005f})
+        {
+            TopologyAnalysis candidate=AnalyzeTopologyAt(vertices,Math.Max(1e-7f,spacing*factor));
+            if(candidate.BoundaryEdges==0&&candidate.NonManifoldEdges==0)return candidate;
+            if(candidate.BoundaryEdges+candidate.NonManifoldEdges*4<best.BoundaryEdges+best.NonManifoldEdges*4)best=candidate;
+        }
+        return best;
+    }
+
+    private static TopologyAnalysis AnalyzeTopologyAt(IReadOnlyList<Vector3> vertices,float quantum)
+    {
+        if (vertices.Count == 0) return new(0,0,0);
+        static string Key(Vector3 v, float q) => $"{MathF.Round(v.X/q)},{MathF.Round(v.Y/q)},{MathF.Round(v.Z/q)}";
+        Dictionary<string, int> edges = [];
+        void Add(Vector3 a, Vector3 b)
+        {
+            string ka = Key(a, quantum), kb = Key(b, quantum);
+            string key = string.CompareOrdinal(ka, kb) <= 0 ? ka + "|" + kb : kb + "|" + ka;
+            edges[key] = edges.GetValueOrDefault(key) + 1;
+        }
+        for (int i = 0; i + 2 < vertices.Count; i += 3)
+        { Add(vertices[i], vertices[i+1]); Add(vertices[i+1], vertices[i+2]); Add(vertices[i+2], vertices[i]); }
+        int openEdges = edges.Values.Count(count => count == 1);
+        int nonManifold = edges.Values.Count(count => count != 1 && count != 2);
+        Dictionary<string,HashSet<string>> graph=[];
+        foreach(string edge in edges.Keys)
+        {
+            string[] parts=edge.Split('|');
+            if(!graph.TryGetValue(parts[0],out HashSet<string>? a))graph[parts[0]]=a=[];
+            if(!graph.TryGetValue(parts[1],out HashSet<string>? b))graph[parts[1]]=b=[];
+            a.Add(parts[1]);b.Add(parts[0]);
+        }
+        int components=0;HashSet<string> visited=[];
+        foreach(string node in graph.Keys) if(visited.Add(node))
+        {components++;Queue<string> q=new();q.Enqueue(node);while(q.Count>0)foreach(string n in graph[q.Dequeue()])if(visited.Add(n))q.Enqueue(n);}
+        return new(openEdges,nonManifold,components);
+    }
+
+    private static double MeshVolume(IReadOnlyList<Vector3> vertices, Vector3 origin)
+    {
+        double signed = 0;
+        for (int i=0;i+2<vertices.Count;i+=3)
+        {
+            Vector3 a=vertices[i]-origin,b=vertices[i+1]-origin,c=vertices[i+2]-origin;
+            signed += a.Dot(b.Cross(c))/6.0;
+        }
+        return Math.Abs(signed);
+    }
+
+    private static void OrientTriangles(List<Vector3> vertices, OrganicShapeParameters parameters)
+    {
+        const float epsilon=0.0005f;
+        for(int i=0;i+2<vertices.Count;i+=3)
+        {
+            Vector3 a=vertices[i],b=vertices[i+1],c=vertices[i+2];
+            Vector3 center=(a+b+c)/3f;
+            Vector3 gradient=new(
+                SampleField(center+Vector3.Right*epsilon,parameters)-SampleField(center-Vector3.Right*epsilon,parameters),
+                SampleField(center+Vector3.Up*epsilon,parameters)-SampleField(center-Vector3.Up*epsilon,parameters),
+                SampleField(center+Vector3.Back*epsilon,parameters)-SampleField(center-Vector3.Back*epsilon,parameters));
+            Vector3 outward=-gradient;
+            if((b-a).Cross(c-a).Dot(outward)<0) (vertices[i+1],vertices[i+2])=(vertices[i+2],vertices[i+1]);
+        }
+    }
+
+    private static void SealBoundaryLoops(List<Vector3> vertices, float spacing)
+    {
+        float quantum = Math.Max(1e-7f, spacing * 0.00001f);
+        static string Key(Vector3 value, float q) =>
+            $"{MathF.Round(value.X/q)},{MathF.Round(value.Y/q)},{MathF.Round(value.Z/q)}";
+        Dictionary<string,(int Count,Vector3 A,Vector3 B,string KA,string KB)> edges=[];
+        void Add(Vector3 a,Vector3 b)
+        {
+            string ka=Key(a,quantum),kb=Key(b,quantum);
+            string key=string.CompareOrdinal(ka,kb)<=0?ka+"|"+kb:kb+"|"+ka;
+            if(edges.TryGetValue(key,out var old))edges[key]=(old.Count+1,old.A,old.B,old.KA,old.KB);
+            else edges[key]=(1,a,b,ka,kb);
+        }
+        for(int i=0;i+2<vertices.Count;i+=3)
+        {Add(vertices[i],vertices[i+1]);Add(vertices[i+1],vertices[i+2]);Add(vertices[i+2],vertices[i]);}
+        var boundary=edges.Values.Where(edge=>edge.Count==1).ToArray();
+        if(boundary.Length==0)return;
+        Dictionary<string,List<int>> incidence=[];
+        for(int i=0;i<boundary.Length;i++)foreach(string key in new[]{boundary[i].KA,boundary[i].KB})
+        {if(!incidence.TryGetValue(key,out List<int>? list))incidence[key]=list=[];list.Add(i);}
+        HashSet<int> seen=[];
+        for(int seed=0;seed<boundary.Length;seed++)if(seen.Add(seed))
+        {
+            Queue<int> queue=new();queue.Enqueue(seed);List<int> component=[];HashSet<string> nodes=[];
+            while(queue.Count>0)
+            {
+                int edge=queue.Dequeue();component.Add(edge);nodes.Add(boundary[edge].KA);nodes.Add(boundary[edge].KB);
+                foreach(string key in new[]{boundary[edge].KA,boundary[edge].KB})
+                    foreach(int other in incidence[key])if(seen.Add(other))queue.Enqueue(other);
+            }
+            if(nodes.Any(node=>incidence[node].Count!=2))continue;
+            Vector3 center=Vector3.Zero;int count=0;
+            foreach(int edge in component){center+=boundary[edge].A+boundary[edge].B;count+=2;}
+            center/=count;
+            foreach(int edge in component)
+            {vertices.Add(boundary[edge].B);vertices.Add(boundary[edge].A);vertices.Add(center);}
+        }
     }
 
     public static OrganicShapeParameters[] BuildArtificialSamples(bool highDetail)
@@ -163,7 +396,7 @@ public static class OrganicMeshGenerator
 
     private static float SampleField(Vector3 point, OrganicShapeParameters parameters)
     {
-        float value = float.NegativeInfinity;
+        Dictionary<int,(float Field,int Parent)> byBone=[];
         foreach (OrganicSegment segment in parameters.Segments)
         {
             Vector3 axis = segment.End - segment.Start;
@@ -176,10 +409,19 @@ public static class OrganicMeshGenerator
             offset.Y /= Math.Max(0.12f, segment.VerticalScale);
             float radius = Mathf.Lerp(segment.StartRadius, segment.EndRadius, t);
             float segmentField = radius - offset.Length();
-            value = float.IsNegativeInfinity(value)
-                ? segmentField
-                : SmoothMaximum(value, segmentField, parameters.ConnectionBlend);
+            if(!byBone.TryGetValue(segment.BoneIndex,out var current))
+                byBone[segment.BoneIndex]=(segmentField,segment.ParentBoneIndex);
+            else
+                byBone[segment.BoneIndex]=(SmoothMaximum(current.Field,segmentField,
+                    Math.Min(parameters.ConnectionBlend,Math.Max(0.01f,radius*0.12f))),segment.ParentBoneIndex);
         }
+        (float Field,int Parent)[] roots=byBone.Where(pair=>pair.Value.Parent<0)
+            .Select(pair=>pair.Value).OrderByDescending(root=>root.Field).ToArray();
+        float value=roots.Length>0?roots[0].Field:float.NegativeInfinity;
+        if(roots.Length>1&&Math.Abs(roots[0].Field-roots[1].Field)<Math.Max(0.025f,parameters.ConnectionBlend*0.6f))
+            value=Math.Min(value,-0.02f);
+        foreach((int bone,(float field,int parent)) in byBone.Where(pair=>pair.Value.Parent>=0).OrderBy(pair=>pair.Key))
+            value=Math.Max(value,SmoothMaximum(byBone[parent].Field,field,parameters.ConnectionBlend));
         return value;
     }
 
@@ -257,29 +499,35 @@ public static class OrganicMeshGenerator
         triangles.Add(c);
     }
 
-    private static ArrayMesh BuildSolidMesh(
-        IReadOnlyList<Vector3> vertices,
-        OrganicShapeParameters parameters,
-        float spacing)
+    private static ArrayMesh BuildSolidMesh(OrganicMeshData data)
     {
         SurfaceTool surface = new();
         surface.Begin(Mesh.PrimitiveType.Triangles);
-        float epsilon = spacing * 0.45f;
-        foreach (Vector3 vertex in vertices)
+        int[] bones=[0,0,0,0];
+        float[] weights=[1f,0f,0f,0f];
+        for(int index=0;index<data.TriangleVertices.Length;index++)
         {
-            Vector3 gradient = new(
-                SampleField(vertex + Vector3.Right * epsilon, parameters) -
-                    SampleField(vertex - Vector3.Right * epsilon, parameters),
-                SampleField(vertex + Vector3.Up * epsilon, parameters) -
-                    SampleField(vertex - Vector3.Up * epsilon, parameters),
-                SampleField(vertex + Vector3.Back * epsilon, parameters) -
-                    SampleField(vertex - Vector3.Back * epsilon, parameters));
-            Vector3 outward = gradient.LengthSquared() > 1e-10f ? -gradient.Normalized() : Vector3.Up;
-            surface.SetNormal(outward);
-            surface.AddVertex(vertex);
+            surface.SetNormal(data.Normals[index]);
+            bones[0]=data.BoneIndices[index];
+            surface.SetBones(bones);
+            surface.SetWeights(weights);
+            surface.AddVertex(data.TriangleVertices[index]);
         }
         ArrayMesh mesh = surface.Commit();
         return mesh;
+    }
+
+    private static int NearestBone(Vector3 point, OrganicShapeParameters parameters)
+    {
+        float best = float.PositiveInfinity; int bone = 0;
+        foreach (OrganicSegment segment in parameters.Segments)
+        {
+            Vector3 axis = segment.End-segment.Start;
+            float t = axis.LengthSquared()>1e-8f ? Math.Clamp((point-segment.Start).Dot(axis)/axis.LengthSquared(),0f,1f):0f;
+            float distance=(point-(segment.Start+axis*t)).LengthSquared();
+            if(distance<best){best=distance;bone=segment.BoneIndex;}
+        }
+        return bone;
     }
 
     private static ArrayMesh BuildWireMesh(IReadOnlyList<Vector3> vertices)

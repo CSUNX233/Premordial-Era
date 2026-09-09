@@ -6,6 +6,7 @@ public readonly record struct RegionalExchangeResult(
     double OxygenUptake,
     double OxygenReleased,
     double SubstrateUptake,
+    double SubstrateDemand,
     double WaterUptake,
     double WaterLost,
     double LightEnergy,
@@ -24,6 +25,7 @@ public readonly record struct RegionalTransportResult(
     double SubstrateTransferred,
     double OxygenTransferred,
     double WaterTransferred,
+    double EnergyTransferred,
     double ConservationResidual,
     double MinimumInventory,
     int ActiveEdges);
@@ -65,9 +67,32 @@ public static class RegionalPhysiology
 
     public static double BodyHydration(DevelopingBody body, Genome genome)
     {
-        Dictionary<int, RegionGene> genes = genome.Regions.ToDictionary(gene => gene.RegionId);
         double capacity = body.Regions.Sum(region => WaterCapacity(region, genome.Metabolism));
         return capacity > 0.0 ? Math.Clamp(body.TotalWater / capacity, 0.0, 1.0) : 0.0;
+    }
+
+    public static double EstimateMatterDemand(
+        DevelopingBody body,Genome genome,double lightEnergyAllowance,
+        SimulationConfig config,double deltaSeconds)
+    {
+        double requested=0.0;
+        foreach(BodyFunctionalGeometry geometry in body.FunctionalGeometry)
+        {
+            BodyRegion region=body.GetRegion(geometry.RegionId);
+            RegionGene gene=genome.GetRegion(geometry.RegionId);
+            double gap=Math.Max(0.0,SubstrateCapacity(region,gene)-region.Substrate);
+            double gate=gene.Permeability*geometry.MatterTransportEfficiency*
+                (0.30+(0.70*region.TransportAvailability))*
+                (1.0/(1.0+(0.55*genome.Metabolism.OxygenCatalysis)));
+            double exposure=Math.Max(0.0,geometry.ExposedSurface);
+            requested+=gap*(1.0-Math.Exp(-gate*exposure*
+                config.MatterUptakePerSurfacePerSecond*deltaSeconds));
+        }
+        double maintenanceReserve=(config.BaseMaintenanceEnergyPerSecond+
+            body.Cache.MaintenanceEnergyPerSecond)*deltaSeconds;
+        double energyAvailable=Math.Max(0.0,body.TotalEnergy+
+            Math.Max(0.0,lightEnergyAllowance)-maintenanceReserve);
+        return Math.Min(requested,energyAvailable/config.MatterAssimilationEnergyPerMatter);
     }
 
     public static RegionalExchangeResult ExchangeWithEnvironment(
@@ -80,18 +105,26 @@ public static class RegionalPhysiology
         SimulationConfig config,
         double deltaSeconds,
         Func<int, int, bool>? surfaceEnabled = null,
-        double lightEnergyAllowance = double.PositiveInfinity)
+        double lightEnergyAllowance = double.PositiveInfinity,
+        MatterReservation? matterReservation = null,
+        double matterDemand = double.NaN)
     {
-        Dictionary<int, RegionGene> genes = genome.Regions.ToDictionary(gene => gene.RegionId);
-        Dictionary<int, BodyRegion> regions = body.Regions.ToDictionary(region => region.RegionId);
-        Dictionary<int, RegionalInventoryDelta> deltas = [];
         double oxygenUptake = 0.0;
         double oxygenReleased = 0.0;
         double substrateUptake = 0.0;
+        double rawSubstrateDemand=0.0;
         double waterUptake = 0.0;
         double waterLost = 0.0;
         double lightEnergy = 0.0;
         double remainingLight = lightEnergyAllowance;
+        if(!double.IsFinite(matterDemand))
+            matterDemand=matterReservation.HasValue
+                ? EstimateMatterDemand(body,genome,lightEnergyAllowance,config,deltaSeconds)
+                : 0.0;
+        double remainingMatter=matterReservation?.Total??double.PositiveInfinity;
+        double reservationFraction=matterReservation.HasValue&&matterDemand>0.0
+            ?Math.Min(1.0,matterReservation.Value.Total/matterDemand):
+            (matterReservation.HasValue?0.0:1.0);
         double assimilationEnergy = 0.0;
         double waterArea = 0.0;
         double airArea = 0.0;
@@ -104,10 +137,10 @@ public static class RegionalPhysiology
             ? centerSample.WaterSurface - depth
             : centerSample.TerrainHeight + Math.Max(0.08, body.Cache.BoundingRadius * 0.22);
 
-        foreach (BodyFunctionalGeometry geometry in body.FunctionalGeometry.OrderBy(item => item.RegionId))
+        foreach (BodyFunctionalGeometry geometry in body.FunctionalGeometry)
         {
-            BodyRegion region = regions[geometry.RegionId];
-            RegionGene gene = genes[geometry.RegionId];
+            BodyRegion region = body.GetRegion(geometry.RegionId);
+            RegionGene gene = genome.GetRegion(geometry.RegionId);
             RegionalInventoryDelta delta = default;
             double oxygenCapacity = OxygenCapacity(region, config);
             double waterCapacity = WaterCapacity(region, genome.Metabolism);
@@ -203,7 +236,11 @@ public static class RegionalPhysiology
                 matterRequest = Math.Min(matterRequest,
                     Math.Max(0.0, region.Energy + delta.Energy - maintenanceReserve) /
                     config.MatterAssimilationEnergyPerMatter);
-                double receivedMatter = environment.WithdrawMatter(samplePosition, matterRequest);
+                rawSubstrateDemand+=matterRequest;
+                double receivedMatter=matterReservation.HasValue
+                    ?Math.Min(remainingMatter,matterRequest*reservationFraction)
+                    :environment.WithdrawMatter(samplePosition,matterRequest);
+                remainingMatter-=receivedMatter;
                 double assimilationCost = receivedMatter * config.MatterAssimilationEnergyPerMatter;
                 delta = delta with
                 {
@@ -230,14 +267,15 @@ public static class RegionalPhysiology
                     waterLost += evaporated;
                 }
             }
-            deltas[geometry.RegionId] = delta;
+            body.ApplyInventoryDelta(geometry.RegionId, delta);
         }
 
-        foreach ((int regionId, RegionalInventoryDelta delta) in deltas.OrderBy(pair => pair.Key))
-            body.ApplyInventoryDelta(regionId, delta);
+        if(matterReservation.HasValue&&remainingMatter>0.0)
+            environment.ReturnMatter(matterReservation.Value,remainingMatter);
 
         return new RegionalExchangeResult(
-            oxygenUptake, oxygenReleased, substrateUptake, waterUptake, waterLost,
+            oxygenUptake, oxygenReleased, substrateUptake,
+            matterReservation.HasValue?matterDemand:rawSubstrateDemand, waterUptake, waterLost,
             lightEnergy, assimilationEnergy, waterArea, airArea, exposedSamples, occludedSamples);
     }
 
@@ -249,82 +287,107 @@ public static class RegionalPhysiology
         Func<int, int, bool>? edgeEnabled = null,
         bool reverseEdgeEnumeration = false)
     {
-        Dictionary<int, BodyRegion> regions = body.Regions.ToDictionary(region => region.RegionId);
-        Dictionary<int, RegionGene> genes = genome.Regions.ToDictionary(gene => gene.RegionId);
-        Dictionary<int, BodyFunctionalGeometry> geometry =
-            body.FunctionalGeometry.ToDictionary(item => item.RegionId);
-        List<TransferRequest> requests = [];
-        IEnumerable<RegionGene> edgeGenes = genome.Regions.Where(gene => !gene.IsCore);
-        edgeGenes = reverseEdgeEnumeration
-            ? edgeGenes.OrderByDescending(gene => gene.RegionId)
-            : edgeGenes.OrderBy(gene => gene.RegionId);
-
-        foreach (RegionGene targetGene in edgeGenes)
+        Span<TransferRequest> requests = stackalloc TransferRequest[GenomeValidator.MaximumRegions * 4];
+        int requestCount = 0;
+        int start = reverseEdgeEnumeration ? genome.Regions.Count - 1 : 0;
+        int end = reverseEdgeEnumeration ? -1 : genome.Regions.Count;
+        int direction = reverseEdgeEnumeration ? -1 : 1;
+        for (int geneIndex = start; geneIndex != end; geneIndex += direction)
         {
+            RegionGene targetGene = genome.Regions[geneIndex];
+            if (targetGene.IsCore) continue;
             int targetId = targetGene.RegionId;
             int sourceId = targetGene.MatterSourceRegionId;
-            if (!regions.ContainsKey(targetId) || !regions.ContainsKey(sourceId) ||
+            int targetIndex = body.IndexOfRegion(targetId);
+            int sourceIndex = body.IndexOfRegion(sourceId);
+            if (targetIndex < 0 || sourceIndex < 0 ||
                 (edgeEnabled is not null && !edgeEnabled(sourceId, targetId)))
-            {
                 continue;
-            }
-            BodyRegion source = regions[sourceId];
-            BodyRegion target = regions[targetId];
+            BodyRegion source = body.Regions[sourceIndex];
+            BodyRegion target = body.Regions[targetIndex];
             double length = Math.Max(
                 0.08,
-                Vector2.Distance(geometry[sourceId].LocalCenter, geometry[targetId].LocalCenter));
+                Vector2.Distance(body.FunctionalGeometry[sourceIndex].LocalCenter,
+                    body.FunctionalGeometry[targetIndex].LocalCenter));
             double crossSection = Math.Max(
                 0.02,
                 Math.Min(source.Matter, target.Matter) * 0.35);
-            double conductance = targetGene.Permeability * geometry[targetId].MatterTransportEfficiency *
+            double conductance = targetGene.Permeability * body.FunctionalGeometry[targetIndex].MatterTransportEfficiency *
                 crossSection / length;
-            AddBidirectionalRequest(requests, source, target, InventoryKind.Substrate,
-                SubstrateCapacity(source, genes[sourceId]), SubstrateCapacity(target, targetGene),
+            AddBidirectionalRequest(requests, ref requestCount, source, target, InventoryKind.Substrate,
+                SubstrateCapacity(source, genome.GetRegion(sourceId)), SubstrateCapacity(target, targetGene),
                 conductance * 0.55 * deltaSeconds);
-            AddBidirectionalRequest(requests, source, target, InventoryKind.Oxygen,
+            AddBidirectionalRequest(requests, ref requestCount, source, target, InventoryKind.Oxygen,
                 OxygenCapacity(source, config), OxygenCapacity(target, config),
                 conductance * 0.85 * deltaSeconds);
-            AddBidirectionalRequest(requests, source, target, InventoryKind.Water,
+            AddBidirectionalRequest(requests, ref requestCount, source, target, InventoryKind.Water,
                 WaterCapacity(source, genome.Metabolism), WaterCapacity(target, genome.Metabolism),
                 conductance * 0.45 * deltaSeconds);
+            double sourceEnergyCapacity=config.MaximumEnergy*source.Matter/
+                Math.Max(0.05,body.Cache.TotalMatter);
+            double targetEnergyCapacity=config.MaximumEnergy*target.Matter/
+                Math.Max(0.05,body.Cache.TotalMatter);
+            double energyConductance=(0.15+(0.85*targetGene.SignalConductivity))*
+                body.FunctionalGeometry[targetIndex].ConnectionTransmission*crossSection/length;
+            AddBidirectionalRequest(requests,ref requestCount,source,target,InventoryKind.Energy,
+                sourceEnergyCapacity,targetEnergyCapacity,energyConductance*0.70*deltaSeconds);
         }
 
-        Dictionary<(int Donor, InventoryKind Kind), double> totals = requests
-            .GroupBy(request => (request.DonorId, request.Kind))
-            .ToDictionary(group => group.Key, group => group.Sum(request => request.Amount));
-        Dictionary<int, RegionalInventoryDelta> deltas = [];
+        for (int index = 1; index < requestCount; index++)
+        {
+            TransferRequest value = requests[index];
+            int insert = index - 1;
+            while (insert >= 0 && Compare(requests[insert], value) > 0)
+            { requests[insert + 1] = requests[insert]; insert--; }
+            requests[insert + 1] = value;
+        }
+        Span<double> totals = stackalloc double[GenomeValidator.MaximumRegions * 4];
+        Span<RegionalInventoryDelta> deltas = stackalloc RegionalInventoryDelta[GenomeValidator.MaximumRegions];
+        Span<bool> activePairs = stackalloc bool[GenomeValidator.MaximumRegions * GenomeValidator.MaximumRegions];
+        for (int index = 0; index < requestCount; index++)
+        {
+            TransferRequest request = requests[index];
+            int donorIndex = body.IndexOfRegion(request.DonorId);
+            totals[(donorIndex * 4) + (int)request.Kind] += request.Amount;
+        }
         double substrateTransferred = 0.0;
         double oxygenTransferred = 0.0;
         double waterTransferred = 0.0;
-        foreach (TransferRequest request in requests
-                     .OrderBy(request => request.DonorId)
-                     .ThenBy(request => request.ReceiverId)
-                     .ThenBy(request => request.Kind))
+        double energyTransferred = 0.0;
+        int activeEdges = 0;
+        for (int index = 0; index < requestCount; index++)
         {
-            double available = Inventory(regions[request.DonorId], request.Kind);
-            double scale = totals[(request.DonorId, request.Kind)] > available
-                ? available / totals[(request.DonorId, request.Kind)]
+            TransferRequest request = requests[index];
+            int donorIndex = body.IndexOfRegion(request.DonorId);
+            int receiverIndex = body.IndexOfRegion(request.ReceiverId);
+            double total = totals[(donorIndex * 4) + (int)request.Kind];
+            double available = Inventory(body.Regions[donorIndex], request.Kind);
+            double scale = total > available
+                ? available / total
                 : 1.0;
             double amount = request.Amount * scale;
-            AddTransferDelta(deltas, request.DonorId, request.Kind, -amount);
-            AddTransferDelta(deltas, request.ReceiverId, request.Kind, amount);
+            deltas[donorIndex] = AddTransferDelta(deltas[donorIndex], request.Kind, -amount);
+            deltas[receiverIndex] = AddTransferDelta(deltas[receiverIndex], request.Kind, amount);
+            int pair = donorIndex * GenomeValidator.MaximumRegions + receiverIndex;
+            if (!activePairs[pair]) { activePairs[pair] = true; activeEdges++; }
             switch (request.Kind)
             {
                 case InventoryKind.Substrate: substrateTransferred += amount; break;
                 case InventoryKind.Oxygen: oxygenTransferred += amount; break;
                 case InventoryKind.Water: waterTransferred += amount; break;
+                case InventoryKind.Energy: energyTransferred += amount; break;
             }
         }
 
-        double before = body.TotalSubstrate + body.TotalOxygen + body.TotalWater;
-        foreach ((int regionId, RegionalInventoryDelta delta) in deltas.OrderBy(pair => pair.Key))
-            body.ApplyInventoryDelta(regionId, delta);
-        double after = body.TotalSubstrate + body.TotalOxygen + body.TotalWater;
+        double before = body.TotalSubstrate + body.TotalOxygen + body.TotalWater + body.TotalEnergy;
+        for (int index = 0; index < body.RegionCount; index++)
+            body.ApplyInventoryDelta(body.Regions[index].RegionId, deltas[index]);
+        double after = body.TotalSubstrate + body.TotalOxygen + body.TotalWater + body.TotalEnergy;
         double minimum = body.Regions.Min(region =>
-            Math.Min(region.Substrate, Math.Min(region.Oxygen, region.Water)));
+            Math.Min(Math.Min(region.Substrate,region.Energy), Math.Min(region.Oxygen, region.Water)));
         return new RegionalTransportResult(
-            substrateTransferred, oxygenTransferred, waterTransferred,
-            after - before, minimum, requests.Select(request => (request.DonorId, request.ReceiverId)).Distinct().Count());
+            substrateTransferred, oxygenTransferred, waterTransferred,energyTransferred,
+            after - before, minimum, activeEdges);
     }
 
     public static RegionalMetabolismResult ReactAndMaintain(
@@ -342,30 +405,40 @@ public static class RegionalPhysiology
         double waste = 0.0;
         double maintenancePaid = 0.0;
         double hypoxia = 0.0;
-        foreach (BodyRegion snapshot in body.Regions.OrderBy(region => region.RegionId).ToArray())
+        int regionCount = body.RegionCount;
+        for (int regionIndex = 0; regionIndex < regionCount; regionIndex++)
         {
-            RegionGene gene = genes[snapshot.RegionId];
+            BodyRegion snapshot = body.Regions[regionIndex];
+            RegionGene gene = genome.GetRegion(snapshot.RegionId);
+            double regionalEnergyCapacity = Math.Max(
+                0.2, config.MaximumEnergy * snapshot.Matter / Math.Max(0.05, body.Cache.TotalMatter));
+            // Respiration follows local demand. Do not burn building material
+            // at a fixed rate while photosynthesis has already filled the reserve.
+            double energyTarget = regionalEnergyCapacity * 0.65;
+            double energyRoom = Math.Max(0.0, energyTarget - snapshot.Energy);
+            double demand = Math.Clamp(energyRoom / Math.Max(0.05, energyTarget * 0.5), 0.0, 1.0);
             double catalyticRate = config.MetabolicSubstratePerSecond *
-                (0.20 + (0.80 * gene.CatalyticActivity)) * snapshot.Matter * deltaSeconds;
+                (0.20 + (0.80 * gene.CatalyticActivity)) * snapshot.Matter * deltaSeconds * demand;
             double aerobicDemand = Math.Min(snapshot.Substrate, catalyticRate) *
                 genome.Metabolism.OxygenUseFraction;
             double aerobicByOxygen = snapshot.Oxygen / config.OxygenPerAerobicSubstrate;
             double aerobic = Math.Min(aerobicDemand, aerobicByOxygen);
+            hypoxia += Math.Max(0.0, aerobicDemand - aerobic);
             double anaerobicCapacity = Math.Min(
                 snapshot.Substrate - aerobic,
                 catalyticRate * (1.0 - genome.Metabolism.OxygenUseFraction));
             double anaerobic = Math.Max(0.0, anaerobicCapacity);
-            double usedSubstrate = aerobic + anaerobic;
-            double usedOxygen = aerobic * config.OxygenPerAerobicSubstrate;
             double producedEnergy =
                 (aerobic * config.AerobicEnergyPerSubstrate *
                     (0.30 + (0.70 * genome.Metabolism.OxygenCatalysis))) +
                 (anaerobic * config.AnaerobicEnergyPerSubstrate *
                     (1.0 - (0.35 * genome.Metabolism.OxygenCatalysis)));
-            double regionalEnergyCapacity = Math.Max(
-                0.2,
-                config.MaximumEnergy * snapshot.Matter / Math.Max(0.05, body.Cache.TotalMatter));
-            producedEnergy = Math.Min(producedEnergy, Math.Max(0.0, regionalEnergyCapacity - snapshot.Energy));
+            double execution = producedEnergy > 0.0 ? Math.Min(1.0, energyRoom / producedEnergy) : 0.0;
+            aerobic *= execution;
+            anaerobic *= execution;
+            producedEnergy *= execution;
+            double usedSubstrate = aerobic + anaerobic;
+            double usedOxygen = aerobic * config.OxygenPerAerobicSubstrate;
             body.ApplyInventoryDelta(snapshot.RegionId, new RegionalInventoryDelta(
                 -usedSubstrate,
                 -usedOxygen,
@@ -375,9 +448,8 @@ public static class RegionalPhysiology
             oxygenConsumed += usedOxygen;
             energyProduced += producedEnergy;
             waste += usedSubstrate;
-            hypoxia += Math.Max(0.0, aerobicDemand - aerobic);
 
-            BodyRegion updated = body.Regions.Single(region => region.RegionId == snapshot.RegionId);
+            BodyRegion updated = body.GetRegion(snapshot.RegionId);
             double maintenance = ((config.BaseMaintenanceEnergyPerSecond *
                     updated.Matter / Math.Max(0.05, body.Cache.TotalMatter)) +
                 (updated.Matter * (0.02 + (0.025 * gene.SignalConductivity)))) * deltaSeconds;
@@ -394,7 +466,8 @@ public static class RegionalPhysiology
     }
 
     private static void AddBidirectionalRequest(
-        List<TransferRequest> requests,
+        Span<TransferRequest> requests,
+        ref int requestCount,
         BodyRegion first,
         BodyRegion second,
         InventoryKind kind,
@@ -407,9 +480,9 @@ public static class RegionalPhysiology
         double signed = coefficient * (firstConcentration - secondConcentration);
         if (Math.Abs(signed) <= 1e-15)
             return;
-        requests.Add(signed > 0.0
+        requests[requestCount++] = signed > 0.0
             ? new TransferRequest(first.RegionId, second.RegionId, kind, signed)
-            : new TransferRequest(second.RegionId, first.RegionId, kind, -signed));
+            : new TransferRequest(second.RegionId, first.RegionId, kind, -signed);
     }
 
     private static double Inventory(BodyRegion region, InventoryKind kind) => kind switch
@@ -420,21 +493,21 @@ public static class RegionalPhysiology
         _ => region.Energy
     };
 
-    private static void AddTransferDelta(
-        Dictionary<int, RegionalInventoryDelta> deltas,
-        int regionId,
-        InventoryKind kind,
-        double amount)
-    {
-        deltas.TryGetValue(regionId, out RegionalInventoryDelta delta);
-        delta = kind switch
+    private static RegionalInventoryDelta AddTransferDelta(
+        RegionalInventoryDelta delta, InventoryKind kind, double amount) => kind switch
         {
             InventoryKind.Substrate => delta with { Substrate = delta.Substrate + amount },
             InventoryKind.Oxygen => delta with { Oxygen = delta.Oxygen + amount },
             InventoryKind.Water => delta with { Water = delta.Water + amount },
             _ => delta with { Energy = delta.Energy + amount }
         };
-        deltas[regionId] = delta;
+
+    private static int Compare(TransferRequest left, TransferRequest right)
+    {
+        int donor = left.DonorId.CompareTo(right.DonorId);
+        if (donor != 0) return donor;
+        int receiver = left.ReceiverId.CompareTo(right.ReceiverId);
+        return receiver != 0 ? receiver : left.Kind.CompareTo(right.Kind);
     }
 
     private readonly record struct TransferRequest(

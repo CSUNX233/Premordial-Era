@@ -1,4 +1,5 @@
 using Godot;
+using NativeEpoch.Simulation;
 
 namespace NativeEpoch.Godot;
 
@@ -33,7 +34,7 @@ public sealed partial class MorphologyLab : Node3D
 
     public override void _Ready()
     {
-        GetWindow().Title = "原生纪 · 人工形态样本台";
+        GetWindow().Title = "原生纪 · 基因驱动形态样本台";
         BuildLightingAndFloor();
         BuildCamera();
         BuildUi();
@@ -43,6 +44,8 @@ public sealed partial class MorphologyLab : Node3D
 
         if (OS.GetCmdlineUserArgs().Contains("--morphology-smoke"))
             RunSmoke();
+        else if (OS.GetCmdlineUserArgs().Contains("--capture-morphology"))
+            CaptureRenderedFrame("phase2-morphology-lab.png");
     }
 
     public override void _Process(double delta)
@@ -195,7 +198,7 @@ public sealed partial class MorphologyLab : Node3D
         header.AddChild(headerBox);
         Label title = new()
         {
-            Text = "形态样本台 A · 人工几何测试输入，非自然演化结果"
+            Text = "形态样本台 · 六组人工基因覆盖，经真实发育与统一表皮生成（非自然演化结果）"
         };
         title.AddThemeFontSizeOverride("font_size", 20);
         title.AddThemeColorOverride("font_color", new Color("8ed6c9"));
@@ -241,7 +244,7 @@ public sealed partial class MorphologyLab : Node3D
         AddButton(content, "返回世界 [F2 / Esc]", ReturnToWorld);
         Label boundary = new()
         {
-            Text = "本场景只验证统一曲面参数、连接过渡与三角形预算；不会写入模拟、共同祖先或遗传数据。",
+            Text = "六组样本走真实 Genome→Development→BodyGeometry→表皮链；人工覆盖只用于形态覆盖，不写回世界或谱系。",
             AutowrapMode = TextServer.AutowrapMode.WordSmart
         };
         boundary.AddThemeColorOverride("font_color", new Color("aebccc"));
@@ -259,7 +262,13 @@ public sealed partial class MorphologyLab : Node3D
         }
         _samples.Clear();
 
-        OrganicShapeParameters[] parameters = OrganicMeshGenerator.BuildArtificialSamples(_highDetail);
+        OrganicShapeParameters[] parameters = MorphologyGenomeFactory.BuildSixDiagnostics()
+            .Select(sample =>
+            {
+                DevelopingBody body = MorphologyGenomeFactory.FullyDeveloped(sample.Genome);
+                BodyGeometry geometry = BodyGeometryBuilder.Build(sample.Genome, body.Regions);
+                return OrganicMeshGenerator.FromBodyGeometry(sample.Name, sample.Genome, geometry, _highDetail);
+            }).ToArray();
         Vector3[] positions =
         [
             new(-12f, 0, -7f), new(0, 0, -7f), new(12f, 0, -7f),
@@ -363,6 +372,8 @@ public sealed partial class MorphologyLab : Node3D
             $"连接过渡：{sample.Parameters.ConnectionBlend:F2}\n" +
             $"采样分辨率：{sample.Parameters.Resolution}³\n" +
             $"三角形：{sample.Geometry.TriangleCount:N0}\n\n" +
+            $"封闭网格：{sample.Geometry.ClosedSurface} · 骨架连通：{sample.Parameters.SourceConnected}\n" +
+            $"体积 基因预算/网格采样：{sample.Parameters.ExpectedVolume:F3}/{sample.Geometry.SampledVolume:F3}\n\n" +
             (_selectedIndex == 5
                 ? "三条分枝与主干由同一等值面提取，连接处是一个连续表面。"
                 : "形状由连续骨架、半径、厚度、渐细与曲率参数共同生成。");
@@ -431,23 +442,57 @@ public sealed partial class MorphologyLab : Node3D
     {
         bool sixSamples = _samples.Count == 6;
         bool finiteTriangles = _samples.All(sample => sample.Geometry.TriangleCount > 0);
+        bool geneticInputs = _samples.All(sample => sample.Parameters.SourceGenomeFingerprint != 0);
+        bool geometryValid = _samples.All(sample => sample.Geometry.ClosedSurface && sample.Parameters.SourceConnected &&
+            double.IsFinite(sample.Geometry.SampledVolume) && sample.Geometry.SampledVolume > 0 &&
+            Math.Abs(sample.Geometry.SampledVolume-sample.Parameters.ExpectedVolume)/sample.Parameters.ExpectedVolume < 0.55);
         bool continuousBranchSurface = _samples.Count == 6 &&
-            _samples[5].Parameters.Segments.Length == 4 &&
+            _samples[5].Parameters.Segments.Length >= 12 &&
             _samples[5].Geometry.Solid.GetSurfaceCount() == 1;
+        GeneratedOrganicMesh disconnected = OrganicMeshGenerator.Generate(new OrganicShapeParameters(
+            "未连接反例", "两条近邻但无父子连接", new Color("ffffff"),
+            [new OrganicSegment(new Vector3(-0.35f,0,0),new Vector3(-0.35f,0,0),0.30f,0.30f,1,0,-1),
+             new OrganicSegment(new Vector3(0.35f,0,0),new Vector3(0.35f,0,0),0.30f,0.30f,1,1,-1)],
+            0.2f, 24));
+        bool disconnectedSeparated = disconnected.ConnectedComponents == 2 &&
+            disconnected.BoundaryEdges == 0 && disconnected.NonManifoldEdges == 0;
         int[] highTriangles = _samples.Select(sample => sample.Geometry.TriangleCount).ToArray();
         ToggleWireframe();
         bool wireframeWorks = _samples.All(sample => sample.Wire.Visible);
         ToggleLod();
         int[] lowTriangles = _samples.Select(sample => sample.Geometry.TriangleCount).ToArray();
+        bool lowGeometryValid = _samples.All(sample => sample.Geometry.ClosedSurface &&
+            sample.Parameters.SourceConnected && sample.Geometry.ConnectedComponents == 1 &&
+            Math.Abs(sample.Geometry.SampledVolume-sample.Parameters.ExpectedVolume)/sample.Parameters.ExpectedVolume < 0.55);
         bool lodReduced = lowTriangles.Length == highTriangles.Length &&
-            lowTriangles.Zip(highTriangles).All(pair => pair.First > 0 && pair.First < pair.Second);
-        bool passed = sixSamples && finiteTriangles && continuousBranchSurface && wireframeWorks && lodReduced;
+            lowTriangles.All(value=>value>0) && lowTriangles.Sum()<highTriangles.Sum() &&
+            lowTriangles.Zip(highTriangles).Count(pair=>pair.First<pair.Second)>=3;
+        bool passed = sixSamples && finiteTriangles && geneticInputs && geometryValid && lowGeometryValid &&
+            continuousBranchSurface && disconnectedSeparated && wireframeWorks && lodReduced;
         GD.Print(
             $"MORPHOLOGY_SMOKE {(passed ? "PASS" : "FAIL")} samples={_samples.Count} " +
             $"high_triangles={string.Join(',', highTriangles)} " +
             $"low_triangles={string.Join(',', lowTriangles)} branch_single_surface={continuousBranchSurface} " +
-            $"wireframe={wireframeWorks} lod_reduced={lodReduced}");
+            $"wireframe={wireframeWorks} lod_reduced={lodReduced} genetic={geneticInputs} geometry_valid={geometryValid} " +
+            $"unconnected_separate={disconnectedSeparated} " +
+            $"unconnected_topology={disconnected.BoundaryEdges}/{disconnected.NonManifoldEdges}/{disconnected.ConnectedComponents} " +
+            $"closed={string.Join(',', _samples.Select(s => s.Geometry.ClosedSurface))} " +
+            $"topology={string.Join(',', _samples.Select(s => $"{s.Geometry.BoundaryEdges}/{s.Geometry.NonManifoldEdges}/{s.Geometry.ConnectedComponents}"))} " +
+            $"volume={string.Join(',', _samples.Select(s => $"{s.Parameters.ExpectedVolume:F2}/{s.Geometry.SampledVolume:F2}"))}");
         GetTree().Quit(passed ? 0 : 1);
+    }
+
+    private async void CaptureRenderedFrame(string fileName)
+    {
+        for (int frame = 0; frame < 4; frame++)
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+
+        string directory = ProjectSettings.GlobalizePath("res://artifacts");
+        DirAccess.MakeDirRecursiveAbsolute(directory);
+        string path = System.IO.Path.Combine(directory, fileName);
+        Error error = GetViewport().GetTexture().GetImage().SavePng(path);
+        GD.Print($"CAPTURE_MORPHOLOGY {(error == Error.Ok ? "PASS" : "FAIL")} path={path} error={error}");
+        GetTree().Quit(error == Error.Ok ? 0 : 1);
     }
 
     private static void AddButton(Container parent, string text, Action action)

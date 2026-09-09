@@ -6,6 +6,7 @@ public struct Organism
 {
     public ulong Id;
     public ulong ParentId;
+    public int Generation;
     public int GenomeId;
     public Vector2 Position;
     public Vector2 Velocity;
@@ -23,15 +24,29 @@ public struct Organism
     public double MetabolicEnergyLastStep;
     public double DehydrationCostLastStep;
     public double ContactPressure;
+    public int ContactNeighborCount;
+    public ulong InteractionOpponentId;
+    public InteractionState InteractionState;
+    public double InteractionIntensity;
+    public double InteractionEnergyLastStep;
+    public Vector2 InteractionDirection;
+    public double ResourceDemandLastStep;
+    public double ResourceSatisfaction;
     public double[] ControllerState;
+    public ForagingMemory ForagingMemory;
     public ControllerInputs ControllerInputs;
     public ControllerOutputs ControllerOutputs;
+    public double ForagingCue;
+    public double ForagingTrend;
+    public double ExplorationDrive;
+    public double SteeringDrive;
     public Vector2 LocalActuationForce;
     public double ActuationTorque;
     public double AgeSeconds;
     public double Maturity;
     public double ReproductionCooldownSeconds;
     public DevelopingBody Body;
+    public BodyPose Pose;
 
     public readonly bool AllFinite =>
         float.IsFinite(Position.X) &&
@@ -51,14 +66,23 @@ public struct Organism
         double.IsFinite(MetabolicEnergyLastStep) && MetabolicEnergyLastStep >= 0.0 &&
         double.IsFinite(DehydrationCostLastStep) && DehydrationCostLastStep >= 0.0 &&
         double.IsFinite(ContactPressure) && ContactPressure >= 0.0 &&
+        ContactNeighborCount>=0&&
+        double.IsFinite(InteractionIntensity)&&InteractionIntensity is >=0.0 and <=1.0&&
+        double.IsFinite(InteractionEnergyLastStep)&&InteractionEnergyLastStep>=0.0&&
+        float.IsFinite(InteractionDirection.X)&&float.IsFinite(InteractionDirection.Y)&&
+        double.IsFinite(ResourceDemandLastStep)&&ResourceDemandLastStep>=0.0&&
+        double.IsFinite(ResourceSatisfaction)&&ResourceSatisfaction is >=0.0 and <=1.0&&
         ControllerState is not null && ControllerState.All(double.IsFinite) &&
+        ForagingMemory is not null && ForagingMemory.AllFinite &&
         ControllerInputs.AllFinite &&
         ControllerOutputs.AllFinite &&
+        double.IsFinite(ForagingCue) && double.IsFinite(ForagingTrend) &&
+        double.IsFinite(ExplorationDrive) && double.IsFinite(SteeringDrive) &&
         float.IsFinite(LocalActuationForce.X) && float.IsFinite(LocalActuationForce.Y) &&
         double.IsFinite(ActuationTorque) &&
         double.IsFinite(AgeSeconds) &&
         double.IsFinite(Maturity) &&
         double.IsFinite(ReproductionCooldownSeconds) &&
         Maturity is >= 0.0 and <= 1.0 &&
-        Body is not null;
+        Body is not null && Pose is not null;
 }

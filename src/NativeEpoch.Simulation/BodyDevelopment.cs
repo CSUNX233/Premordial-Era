@@ -77,7 +77,6 @@ public readonly record struct BodyCache(
     double StorageCapacity,
     double MaintenanceEnergyPerSecond,
     double MaximumActivationEnergyPerSecond,
-    Vector2 PropulsionVector,
     double BoundingRadius,
     double MatterConnectivity,
     double SignalConnectivity)
@@ -99,8 +98,6 @@ public readonly record struct BodyCache(
         double.IsFinite(StorageCapacity) &&
         double.IsFinite(MaintenanceEnergyPerSecond) &&
         double.IsFinite(MaximumActivationEnergyPerSecond) &&
-        float.IsFinite(PropulsionVector.X) &&
-        float.IsFinite(PropulsionVector.Y) &&
         double.IsFinite(BoundingRadius) &&
         double.IsFinite(MatterConnectivity) &&
         double.IsFinite(SignalConnectivity);
@@ -133,8 +130,7 @@ public sealed class DevelopingBody
             initialOxygen,
             initialWater,
             initialEnergy));
-        Cache = BodyCalculator.Recalculate(genome, _regions);
-        FunctionalGeometry = BodyCalculator.BuildFunctionalGeometry(genome, _regions, Cache.CenterOfMass);
+        RebuildGeometry(genome);
     }
 
     public DevelopingBody(Genome genome, IEnumerable<BodyRegion> regionalState)
@@ -146,19 +142,36 @@ public sealed class DevelopingBody
         {
             throw new ArgumentException("Regional state must be finite, unique, and present in the genome.", nameof(regionalState));
         }
-        Cache = BodyCalculator.Recalculate(genome, _regions);
-        FunctionalGeometry = BodyCalculator.BuildFunctionalGeometry(genome, _regions, Cache.CenterOfMass);
+        RebuildGeometry(genome);
     }
 
     public IReadOnlyList<BodyRegion> Regions => _regions;
     public BodyCache Cache { get; private set; }
-    public IReadOnlyList<BodyFunctionalGeometry> FunctionalGeometry { get; private set; }
+    public BodyGeometry Geometry { get; private set; } = null!;
+    public IReadOnlyList<BodyFunctionalGeometry> FunctionalGeometry { get; private set; } = [];
+    private BodyFunctionalGeometry[] RestFunctionalGeometry { get; set; } = [];
+    private BodyFunctionalGeometry[] PosedFunctionalGeometry { get; set; } = [];
+    private BodySurfaceSample[][] PosedSurfaceSamples { get; set; } = [];
     public int RegionCount => _regions.Count;
     public double TotalSubstrate => _regions.Sum(region => region.Substrate);
     public double TotalOxygen => _regions.Sum(region => region.Oxygen);
     public double TotalWater => _regions.Sum(region => region.Water);
     public double TotalEnergy => _regions.Sum(region => region.Energy);
     public double AverageDamage => _regions.Average(region => region.Damage);
+
+    public BodyRegion GetRegion(int regionId)
+    {
+        int index = IndexOfRegion(regionId);
+        return index >= 0 ? _regions[index] : throw new KeyNotFoundException($"Body has no region {regionId}.");
+    }
+
+    public int IndexOfRegion(int regionId)
+    {
+        for (int index = 0; index < _regions.Count; index++)
+            if (_regions[index].RegionId == regionId)
+                return index;
+        return -1;
+    }
 
     public double Grow(
         Genome genome,
@@ -232,8 +245,7 @@ public sealed class DevelopingBody
 
         if (totalGrowth > 0.0)
         {
-            Cache = BodyCalculator.Recalculate(genome, _regions);
-            FunctionalGeometry = BodyCalculator.BuildFunctionalGeometry(genome, _regions, Cache.CenterOfMass);
+            RebuildGeometry(genome);
         }
         return totalGrowth;
     }
@@ -318,6 +330,124 @@ public sealed class DevelopingBody
     public double ConsumeSubstrate(double requested) => ConsumeInventory(requested, InventoryKind.Substrate);
     public double ConsumeOxygen(double requested) => ConsumeInventory(requested, InventoryKind.Oxygen);
     public double ConsumeWater(double requested) => ConsumeInventory(requested, InventoryKind.Water);
+
+    public double ConsumeRegionEnergy(int regionId, double requested)
+    {
+        if (!double.IsFinite(requested) || requested < 0) throw new ArgumentOutOfRangeException(nameof(requested));
+        int index = _regions.FindIndex(region => region.RegionId == regionId);
+        if (index < 0) return 0;
+        BodyRegion region = _regions[index];
+        double paid = Math.Min(region.Energy, requested);
+        _regions[index] = region with { Energy = region.Energy - paid };
+        return paid;
+    }
+
+    public void UpdateFunctionalState(
+        Genome genome,
+        ControllerOutputs outputs,
+        double localLight,
+        double localPressure,
+        ForagingDecision foraging,
+        double deltaSeconds)
+    {
+        Span<BodyRegion> previous = stackalloc BodyRegion[GenomeValidator.MaximumRegions];
+        for (int index = 0; index < _regions.Count; index++) previous[index] = _regions[index];
+        for (int index = 0; index < _regions.Count; index++)
+        {
+            BodyRegion region = _regions[index];
+            RegionGene gene = genome.GetRegion(region.RegionId);
+            BodyRegion signalSource = default;
+            bool hasSource = false;
+            if (!gene.IsCore)
+                for (int sourceIndex = 0; sourceIndex < _regions.Count; sourceIndex++)
+                    if (previous[sourceIndex].RegionId == gene.SignalSourceRegionId)
+                    { signalSource = previous[sourceIndex]; hasSource = true; break; }
+            double sourceSignal = hasSource ? signalSource.InternalSignal * gene.SignalConductivity : 0.0;
+            BodyFunctionalGeometry functional = FunctionalGeometry[index];
+            double local = Math.Clamp(
+                (localLight * Vector2.Dot(functional.Direction, Vector2.UnitX)) +
+                (foraging.ResourceGradient*0.70*functional.Direction.X)+
+                ((foraging.ResourceLateral+(0.35*foraging.ExplorationSignal))*0.90*functional.Direction.Y)-
+                (0.08 * localPressure), -1.0, 1.0);
+            double targetSignal = Math.Tanh(local + sourceSignal);
+            double signalRate = 0.8 + (3.2 * gene.SignalConductivity);
+            double signalBlend = 1.0 - Math.Exp(-signalRate * deltaSeconds);
+            double nextSignal = Math.Clamp(region.InternalSignal +
+                ((targetSignal - region.InternalSignal) * signalBlend), -1.0, 1.0);
+
+            BodyRegion matterSource = default;
+            bool hasMatterSource = false;
+            if (!gene.IsCore)
+                for (int sourceIndex = 0; sourceIndex < _regions.Count; sourceIndex++)
+                    if (previous[sourceIndex].RegionId == gene.MatterSourceRegionId)
+                    { matterSource = previous[sourceIndex]; hasMatterSource = true; break; }
+            double sourceTransport = hasMatterSource ? matterSource.TransportAvailability : 1.0;
+            double targetTransport = sourceTransport * gene.Permeability *
+                (0.25 + (0.75 * outputs.PermeabilityGate));
+            double transportBlend = 1.0 - Math.Exp(-(0.5 + (2.5 * gene.Permeability)) * deltaSeconds);
+            double nextTransport = Math.Clamp(region.TransportAvailability +
+                ((targetTransport - region.TransportAvailability) * transportBlend), 0.0, 1.0);
+            double activation = Math.Clamp(outputs.ContractionActivation * gene.Contractility *
+                (0.65 + (0.35 * ((nextSignal + 1.0) * 0.5))) *
+                (0.60 + (0.40 * gene.SignalConductivity)), 0.0, 1.0);
+            _regions[index] = region with
+                { InternalSignal = nextSignal, TransportAvailability = nextTransport, Activation = activation };
+        }
+    }
+
+    public void ApplyPoseGeometry(Genome genome, BodyPose pose)
+    {
+        for (int index = 0; index < RestFunctionalGeometry.Length; index++)
+        {
+            BodyFunctionalGeometry functional = RestFunctionalGeometry[index];
+            BodyGeometryRegion old = Geometry.Regions[index];
+            if (!pose.TryGetRegion(functional.RegionId, out BodyPoseRegion current))
+                current = new BodyPoseRegion(old.RegionId, old.Center, old.Angle, old.Length,
+                    old.StartRadius + old.EndRadius,
+                    (old.StartRadius + old.EndRadius) * old.VerticalScale, 0.0);
+            double delta = current.Angle - old.Angle;
+            double c = Math.Cos(delta), s = Math.Sin(delta);
+            BodySurfaceSample[] posedSamples = PosedSurfaceSamples[index];
+            for (int sampleIndex = 0; sampleIndex < functional.SurfaceSamples.Count; sampleIndex++)
+            {
+                BodySurfaceSample sample = functional.SurfaceSamples[sampleIndex];
+                Vector2 local = new(sample.LocalPosition.X - old.Center.X, sample.LocalPosition.Z - old.Center.Y);
+                Vector2 rotated = new((float)(local.X*c-local.Y*s), (float)(local.X*s+local.Y*c));
+                double lengthScale = current.Length / Math.Max(1e-8, old.Length);
+                Vector3 p = new(current.LocalCenter.X + rotated.X*(float)lengthScale,
+                    sample.LocalPosition.Y * (float)(current.Thickness/Math.Max(1e-8,
+                        (old.StartRadius + old.EndRadius) * old.VerticalScale)),
+                    current.LocalCenter.Y + rotated.Y*(float)lengthScale);
+                Vector3 n = new((float)(sample.LocalNormal.X*c-sample.LocalNormal.Z*s), sample.LocalNormal.Y,
+                    (float)(sample.LocalNormal.X*s+sample.LocalNormal.Z*c));
+                posedSamples[sampleIndex] = sample with
+                    { LocalPosition = p, LocalNormal = Vector3.Normalize(n) };
+            }
+            PosedFunctionalGeometry[index] = functional with
+            {
+                LocalCenter = current.LocalCenter - Cache.CenterOfMass,
+                Direction = new Vector2((float)Math.Cos(current.Angle), (float)Math.Sin(current.Angle)),
+                SurfaceSamples = posedSamples
+            };
+        }
+    }
+
+    private void RebuildGeometry(Genome genome)
+    {
+        Cache = BodyCalculator.Recalculate(genome, _regions);
+        Geometry = BodyGeometryBuilder.Build(genome, _regions);
+        RestFunctionalGeometry = BodyCalculator.BuildFunctionalGeometry(
+            genome, _regions, Cache.CenterOfMass, Geometry).ToArray();
+        PosedFunctionalGeometry = new BodyFunctionalGeometry[RestFunctionalGeometry.Length];
+        PosedSurfaceSamples = new BodySurfaceSample[RestFunctionalGeometry.Length][];
+        for (int index = 0; index < RestFunctionalGeometry.Length; index++)
+        {
+            BodySurfaceSample[] samples = RestFunctionalGeometry[index].SurfaceSamples.ToArray();
+            PosedSurfaceSamples[index] = samples;
+            PosedFunctionalGeometry[index] = RestFunctionalGeometry[index] with { SurfaceSamples = samples };
+        }
+        FunctionalGeometry = PosedFunctionalGeometry;
+    }
 
     public double LimitTotalEnergy(double maximum)
     {
@@ -473,7 +603,6 @@ public static class BodyCalculator
         double storage = 0.0;
         double maintenance = 0.0;
         double activation = 0.0;
-        Vector2 propulsion = Vector2.Zero;
         double radius = 0.0;
         int matterLinks = 0;
         int signalLinks = 0;
@@ -510,19 +639,12 @@ public static class BodyCalculator
             activation += sample.Body.Matter *
                 ((0.55 * gene.Contractility) + (0.20 * gene.SignalConductivity) +
                  (0.18 * gene.CatalyticActivity)) * signalPath;
-            Vector2 materialDirection = new(
-                (float)Math.Cos(sample.Angle),
-                (float)Math.Sin(sample.Angle));
-            propulsion += materialDirection * (float)(
-                sample.Body.Matter * gene.Contractility *
-                (0.35 + (0.65 * gene.Rigidity)) * signalPath);
             radius = Math.Max(radius,
                 Vector2.Distance(sample.Center, centerOfMass) +
                 (0.5 * Math.Sqrt((sample.Length * sample.Length) + (sample.Width * sample.Width))));
         }
 
         int count = Math.Max(1, samples.Count);
-        double propulsionDivisor = Math.Max(0.25, physicalMass + (drag * 0.08));
         return new BodyCache(
             totalMatter,
             physicalMass,
@@ -539,7 +661,6 @@ public static class BodyCalculator
             storage,
             maintenance,
             activation,
-            propulsion / (float)propulsionDivisor,
             radius,
             matterLinks / (double)count,
             signalLinks / (double)count);
@@ -548,67 +669,32 @@ public static class BodyCalculator
     public static IReadOnlyList<BodyVisualRegion> BuildVisualRegions(
         Genome genome,
         IReadOnlyList<BodyRegion> bodyRegions)
-    {
-        Dictionary<int, RegionGene> genes = genome.Regions.ToDictionary(gene => gene.RegionId);
-        Dictionary<int, Vector2> centers = [];
-        Dictionary<int, double> angles = [];
-        List<BodyVisualRegion> result = new(bodyRegions.Count);
-        List<BodyRegion> pending = bodyRegions.ToList();
+        => BuildVisualRegions(BodyGeometryBuilder.Build(genome, bodyRegions));
 
-        while (pending.Count > 0)
-        {
-            int pendingIndex = pending.FindIndex(body =>
-            {
-                RegionGene candidate = genes[body.RegionId];
-                return candidate.IsCore || centers.ContainsKey(candidate.ParentRegionId);
-            });
-            if (pendingIndex < 0)
-                throw new InvalidOperationException("Developed geometry is not rooted at the core.");
-
-            BodyRegion body = pending[pendingIndex];
-            pending.RemoveAt(pendingIndex);
-            RegionGene gene = genes[body.RegionId];
-            double scale = Math.Sqrt(Math.Clamp(body.Matter / TargetMatter(gene), 0.0, 1.0));
-            double length = gene.TargetLength * scale;
-            double width = gene.TargetWidth * scale;
-            double angle = gene.RelativeAngle;
-            Vector2 parentCenter = Vector2.Zero;
-            if (!gene.IsCore)
-            {
-                parentCenter = centers[gene.ParentRegionId];
-                angle += angles[gene.ParentRegionId];
-            }
-
-            Vector2 direction = new((float)Math.Cos(angle), (float)Math.Sin(angle));
-            Vector2 center = gene.IsCore
-                ? Vector2.Zero
-                : parentCenter + (direction * (float)(length * 0.5));
-            centers[gene.RegionId] = center;
-            angles[gene.RegionId] = angle;
-
-            Vector3 color = new(
-                (float)(0.18 + (0.68 * gene.Pigment)),
-                (float)(0.20 + (0.65 * gene.LightReactivity)),
-                (float)(0.22 + (0.58 * gene.Permeability)));
-            result.Add(new BodyVisualRegion(
-                gene.RegionId,
-                center,
-                angle,
-                length,
-                width,
-                Math.Max(0.08, width * (0.30 + (0.45 * gene.Density))),
-                color));
-        }
-
-        return result.AsReadOnly();
-    }
+    public static IReadOnlyList<BodyVisualRegion> BuildVisualRegions(BodyGeometry geometry)
+        => Array.AsReadOnly(geometry.Regions.Select(region => new BodyVisualRegion(
+            region.RegionId,
+            region.Center,
+            region.Angle,
+            region.Length,
+            region.StartRadius + region.EndRadius,
+            (region.StartRadius + region.EndRadius) * region.VerticalScale,
+            region.Color)).ToArray());
 
     public static IReadOnlyList<BodyFunctionalGeometry> BuildFunctionalGeometry(
         Genome genome,
         IReadOnlyList<BodyRegion> bodyRegions,
         Vector2 centerOfMass)
+        => BuildFunctionalGeometry(genome, bodyRegions, centerOfMass,
+            BodyGeometryBuilder.Build(genome, bodyRegions));
+
+    public static IReadOnlyList<BodyFunctionalGeometry> BuildFunctionalGeometry(
+        Genome genome,
+        IReadOnlyList<BodyRegion> bodyRegions,
+        Vector2 centerOfMass,
+        BodyGeometry geometry)
     {
-        IReadOnlyList<BodyVisualRegion> visuals = BuildVisualRegions(genome, bodyRegions);
+        IReadOnlyList<BodyVisualRegion> visuals = BuildVisualRegions(geometry);
         Dictionary<int, RegionGene> genes = genome.Regions.ToDictionary(gene => gene.RegionId);
         Dictionary<int, BodyVisualRegion> byId = visuals.ToDictionary(region => region.RegionId);
         Dictionary<int, double> signalPaths = [];
@@ -727,7 +813,6 @@ public static class BodyCalculator
             Math.Abs(left.StorageCapacity - right.StorageCapacity),
             Math.Abs(left.MaintenanceEnergyPerSecond - right.MaintenanceEnergyPerSecond),
             Math.Abs(left.MaximumActivationEnergyPerSecond - right.MaximumActivationEnergyPerSecond),
-            Vector2.Distance(left.PropulsionVector, right.PropulsionVector),
             Math.Abs(left.BoundingRadius - right.BoundingRadius),
             Math.Abs(left.MatterConnectivity - right.MatterConnectivity),
             Math.Abs(left.SignalConnectivity - right.SignalConnectivity)

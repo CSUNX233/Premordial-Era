@@ -1,5 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
+    <!-- The editor's F5 build still runs hundreds of pure-simulation updates.
+         Keep portable symbols, but optimize this Node-free core in Debug. -->
+    <Optimize>true</Optimize>
+    <DebugType>portable</DebugType>
   </PropertyGroup>
 </Project>

@@ -1,0 +1,5 @@
+phase2C fixed finite-resource common-garden supplement: identical +4 mineral brush, radius 8, per founder site; externally accounted
+seed=20261011 candidate=True id=25 parent=2 lineage=2>25 common_garden=True revert=controller
+water ancestor[repro=2.00,birth=4,death=0,mature_child/grand=1/0,gen=2] candidate[repro=2.00,birth=4,death=0,mature_child/grand=1/0,gen=2] reverted[repro=2.00,birth=4,death=0,mature_child/grand=1/0,gen=2]
+land ancestor[repro=4.50,birth=9,death=3,mature_child/grand=0/0,gen=1] candidate[repro=4.50,birth=9,death=3,mature_child/grand=0/0,gen=1] reverted[repro=4.50,birth=9,death=3,mature_child/grand=0/0,gen=1]
+source_advantage=False reversion_support=False land_adaptation=False conclusion=a mature natural descendant was recovered, but paired reproductive assays do not establish adaptation; no land adaptation was established

@@ -7,6 +7,10 @@ public sealed record SimulationConfig
     public double TerrainElevationOffset { get; init; }
     public double FixedDeltaSeconds { get; init; } = 0.1;
     public int MaxPopulation { get; init; } = 20_000;
+    public double InitialMineralScale { get; init; } = 1.0;
+    // Optional preset: changing founder count transfers matter from the same
+    // initial environment budget, rather than adding ecosystem resources.
+    public int? ResourceBudgetReferenceAncestors { get; init; }
 
     public double CoreInitialMatter { get; init; } = 0.25;
     public double AncestorStoredMatter { get; init; } = 1.5;
@@ -27,8 +31,20 @@ public sealed record SimulationConfig
     public double MaximumMovementSpeed { get; init; } = 2.4;
     public double VelocityDampingPerSecond { get; init; } = 0.85;
     public double MovementEnergyPerDistance { get; init; } = 0.16;
+    public double ActiveSurfaceDriveSpeed { get; init; } = 4.0;
+    public double ActiveSurfaceDriveEnergyScale { get; init; } = 0.08;
+    public double ForagingSenseDistance { get; init; } = 4.0;
+    public double ForagingCueMemorySeconds { get; init; } = 2.5;
+    public double ExplorationMemorySeconds { get; init; } = 3.5;
+    public double ExplorationMemoryRadius { get; init; } = 8.0;
+    public double CuriosityStrength { get; init; } = 0.55;
+    public double ExplorationActivityFloor { get; init; } = 0.52;
+    public double ForagingRestEnergyFraction { get; init; } = 0.16;
     public float SeparationRadius { get; init; } = 2.8f;
     public double SeparationAcceleration { get; init; } = 4.0;
+    public double ActiveContestForce { get; init; } = 2.2;
+    public double ContestEnergyPerForceSecond { get; init; } = 0.06;
+    public double ReproductionBlockedRetrySeconds { get; init; } = 1.5;
     public double ReproductionEnergyCost { get; init; } = 9.0;
     public double ReproductionEnergyThreshold { get; init; } = 14.0;
     public double MaturityAgeSeconds { get; init; } = 22.0;
@@ -53,6 +69,7 @@ public sealed record SimulationConfig
     public double MetabolicSubstratePerSecond { get; init; } = 0.022;
     public double ControllerNodeEnergyPerSecond { get; init; } = 0.003;
     public double ControllerActivationEnergyPerSecond { get; init; } = 0.025;
+    public double LocalActuationEnergyScale { get; init; } = 0.18;
     public double SecretionMatterPerSecond { get; init; } = 0.006;
     public double SecretionEnergyPerMatter { get; init; } = 0.8;
 
@@ -77,6 +94,8 @@ public sealed record SimulationConfig
             throw new ArgumentOutOfRangeException(nameof(FixedDeltaSeconds));
         if (MaxPopulation < 1 || ancestorCount < 1 || ancestorCount > MaxPopulation)
             throw new ArgumentOutOfRangeException(nameof(ancestorCount));
+        if (ResourceBudgetReferenceAncestors is < 0)
+            throw new ArgumentOutOfRangeException(nameof(ResourceBudgetReferenceAncestors));
         if (MaximumAquaticSpawnAttempts < 1)
             throw new ArgumentOutOfRangeException(nameof(MaximumAquaticSpawnAttempts));
         if (!float.IsFinite(PreferredAquaticSpawnMaximumDepth) ||
@@ -90,16 +109,23 @@ public sealed record SimulationConfig
             throw new InvalidOperationException("Reproduction must pay at least the newborn's starting energy.");
         if (MatterAssimilationEnergyPerMatter < AerobicEnergyPerSubstrate)
             throw new InvalidOperationException("Mineral assimilation must cost at least the maximum substrate energy yield.");
+        if (ExplorationActivityFloor is > 1.0 || ForagingRestEnergyFraction is >= 1.0)
+            throw new InvalidOperationException("Foraging activity and rest fractions must stay below one.");
 
         double[] finitePositive =
         [
-            CoreInitialMatter, AncestorStoredMatter, AncestorEnergy, NewbornEnergy, NewbornSubstrate,
+            InitialMineralScale, CoreInitialMatter, AncestorStoredMatter, AncestorEnergy, NewbornEnergy, NewbornSubstrate,
             MaximumEnergy, BaseStoredMatter, MatterUptakePerSurfacePerSecond,
             MatterAssimilationEnergyPerMatter, WasteRemineralizationPerSecond, LightEnergyPerSurfacePerSecond,
             SurfaceLightEnergyPerWorldAreaPerSecond,
             BaseMaintenanceEnergyPerSecond, GrowthMatterPerSecond, GrowthEnergyPerMatter,
             PropulsionAccelerationScale, MaximumMovementSpeed, VelocityDampingPerSecond,
-            MovementEnergyPerDistance, SeparationRadius, SeparationAcceleration,
+            MovementEnergyPerDistance, ActiveSurfaceDriveSpeed, ActiveSurfaceDriveEnergyScale,
+            ForagingSenseDistance, ForagingCueMemorySeconds,
+            ExplorationMemorySeconds, ExplorationMemoryRadius, CuriosityStrength,
+            ExplorationActivityFloor, ForagingRestEnergyFraction,
+            SeparationRadius, SeparationAcceleration,
+            ActiveContestForce,ContestEnergyPerForceSecond,ReproductionBlockedRetrySeconds,
             ReproductionEnergyCost, ReproductionEnergyThreshold, MaturityAgeSeconds,
             ReproductionCooldownSeconds, SenescenceOnsetSeconds, SenescenceTimeScaleSeconds,
             SenescenceHazardPerSecond, JuvenileHazardPerSecond, NewbornOffsetRadius,
@@ -107,7 +133,7 @@ public sealed record SimulationConfig
             WaterOxygenTransferCoefficient, AirOxygenTransferCoefficient,
             OxygenPerAerobicSubstrate, AerobicEnergyPerSubstrate, AnaerobicEnergyPerSubstrate,
             MetabolicSubstratePerSecond, ControllerNodeEnergyPerSecond,
-            ControllerActivationEnergyPerSecond, SecretionMatterPerSecond,
+            ControllerActivationEnergyPerSecond, LocalActuationEnergyScale, SecretionMatterPerSecond,
             SecretionEnergyPerMatter, VerticalContractionAcceleration,
             BuoyancyAccelerationScale, WaterVerticalDampingPerSecond, LandFrictionMultiplier,
             DryingRatePerSecond, RehydrationRatePerSecond, DehydrationEnergyCostPerSecond,

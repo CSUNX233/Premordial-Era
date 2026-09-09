@@ -26,6 +26,9 @@ public interface IEnvironmentField
 public interface IMutableEnvironmentField : IEnvironmentField
 {
     double WithdrawMatter(Vector2 position, double requestedAmount);
+    IReadOnlyDictionary<ulong,MatterReservation> ReserveMatter(
+        IEnumerable<MatterUptakeRequest> requests);
+    void ReturnMatter(MatterReservation reservation,double unusedAmount);
     void DepositDetritus(Vector2 position, double amount);
     void DepositMetabolicWaste(Vector2 position, double amount);
     double WithdrawOxygen(Vector2 position, float depth, double immersion, double requestedAmount);
@@ -55,6 +58,20 @@ public readonly record struct LightEnergyRequest(
     Vector2 Position,
     float Depth,
     double RequestedEnergy);
+
+public readonly record struct MatterUptakeRequest(
+    ulong OrganismId,
+    Vector2 Position,
+    double RequestedMatter);
+
+public readonly record struct MatterReservation(
+    ulong OrganismId,
+    int CellIndex,
+    double Minerals,
+    double Detritus)
+{
+    public double Total=>Minerals+Detritus;
+}
 
 public readonly record struct EnvironmentBrushCommand(
     Vector2 Position,
@@ -142,8 +159,8 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
                     config.TerrainElevationOffset;
                 _temperature[index] = 0.45 + (0.45 * (1.0 - Math.Abs(centerY))) + (variation * 0.05);
                 _light[index] = 0.50 + (0.35 * (1.0 - normalizedY)) + (variation * 0.10);
-                _minerals[index] = 0.10 + (variation * 0.14) +
-                    (Math.Max(0.0, 1.0 - radial) * 0.08);
+                _minerals[index] = config.InitialMineralScale * (0.10 + (variation * 0.14) +
+                    (Math.Max(0.0, 1.0 - radial) * 0.08));
                 _detritus[index] = 0.0;
                 _metabolicWaste[index] = 0.0;
                 _moisture[index] = Math.Clamp(1.15 - radial, 0.15, 1.0);
@@ -172,6 +189,14 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
     }
 
     public double TotalMinerals => Sum(_minerals);
+    internal void SetInitialMineralBudget(double budget)
+    {
+        if(!double.IsFinite(budget)||budget<0.0)
+            throw new InvalidOperationException("The initial resource budget cannot fund this many founders.");
+        double current=TotalMinerals;
+        double scale=current>0.0?budget/current:0.0;
+        for(int index=0;index<_minerals.Length;index++)_minerals[index]*=scale;
+    }
     public double TotalDetritus => Sum(_detritus);
     public double TotalMetabolicWaste => Sum(_metabolicWaste);
     public double TotalOxygen => Sum(_dissolvedOxygen) + Sum(_airOxygen);
@@ -233,6 +258,45 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         double mineralRequest = requestedAmount * (mineralSignal / totalSignal);
         double detritusRequest = requestedAmount - mineralRequest;
         return Withdraw(_minerals, quad, mineralRequest) + Withdraw(_detritus, quad, detritusRequest);
+    }
+
+    public IReadOnlyDictionary<ulong,MatterReservation> ReserveMatter(
+        IEnumerable<MatterUptakeRequest> requests)
+    {
+        Dictionary<ulong,MatterReservation> reservations=[];
+        foreach(IGrouping<int,MatterUptakeRequest> group in requests
+                    .Where(request=>request.RequestedMatter>0.0)
+                    .GroupBy(request=>DominantCell(Locate(request.Position))))
+        {
+            MatterUptakeRequest[] ordered=group.OrderBy(request=>request.OrganismId).ToArray();
+            double totalRequest=ordered.Sum(request=>request.RequestedMatter);
+            double minerals=_minerals[group.Key],detritus=_detritus[group.Key];
+            double available=minerals+detritus;
+            double fraction=totalRequest>0.0?Math.Min(1.0,available/totalRequest):0.0;
+            double mineralShare=available>0.0?minerals/available:0.0;
+            double totalMinerals=0.0,totalDetritus=0.0;
+            foreach(MatterUptakeRequest request in ordered)
+            {
+                double amount=request.RequestedMatter*fraction;
+                MatterReservation reservation=new(request.OrganismId,group.Key,
+                    amount*mineralShare,amount*(1.0-mineralShare));
+                reservations[request.OrganismId]=reservation;
+                totalMinerals+=reservation.Minerals;totalDetritus+=reservation.Detritus;
+            }
+            Remove(_minerals,group.Key,Math.Min(minerals,totalMinerals));
+            Remove(_detritus,group.Key,Math.Min(detritus,totalDetritus));
+        }
+        return reservations;
+    }
+
+    public void ReturnMatter(MatterReservation reservation,double unusedAmount)
+    {
+        if(!double.IsFinite(unusedAmount)||unusedAmount<0.0||unusedAmount>reservation.Total+1e-10)
+            throw new ArgumentOutOfRangeException(nameof(unusedAmount));
+        if(unusedAmount<=0.0||reservation.Total<=0.0)return;
+        double fraction=Math.Min(1.0,unusedAmount/reservation.Total);
+        Add(_minerals,reservation.CellIndex,reservation.Minerals*fraction);
+        Add(_detritus,reservation.CellIndex,reservation.Detritus*fraction);
     }
 
     public void DepositDetritus(Vector2 position, double amount)
@@ -436,6 +500,14 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
     }
 
     private int Index(int x, int y) => (y * _gridSize) + x;
+    private static int DominantCell(CellQuad quad)
+    {
+        int index=quad.I00;double weight=quad.W00;
+        if(quad.W10>weight){index=quad.I10;weight=quad.W10;}
+        if(quad.W01>weight){index=quad.I01;weight=quad.W01;}
+        if(quad.W11>weight)index=quad.I11;
+        return index;
+    }
 
     private CellQuad Locate(Vector2 position)
     {

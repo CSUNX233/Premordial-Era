@@ -39,8 +39,22 @@ public readonly record struct OrganismPresentationState(
     double DevelopmentCompletion,
     EnvironmentSample Environment,
     BodyCache Body,
+    BodyGeometry Geometry,
+    BodyGeometry VisualTemplateGeometry,
     IReadOnlyList<BodyVisualRegion> Regions,
-    IReadOnlyList<BodyRegion> RegionInventories);
+    IReadOnlyList<BodyRegion> RegionInventories)
+{
+    public int Generation { get; init; }
+    public double ExplorationDrive { get; init; }
+    public double ForagingTrend { get; init; }
+    public int ContactNeighborCount { get; init; }
+    public ulong InteractionOpponentId { get; init; }
+    public InteractionState InteractionState { get; init; }
+    public double InteractionIntensity { get; init; }
+    public Vector2 InteractionDirection { get; init; }
+    public double ResourceSatisfaction { get; init; }
+    public double ResourceDemandLastStep { get; init; }
+}
 
 public sealed class WorldPresentationSnapshot
 {
