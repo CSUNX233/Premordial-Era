@@ -142,7 +142,8 @@ public readonly record struct RegionGene(
     double PhotosyntheticExpression = 0.0,
     double FeedingExpression = 0.0,
     double DigestiveExpression = 0.0,
-    double DecomposerExpression = 0.0)
+    double DecomposerExpression = 0.0,
+    double AirExchangeAffinity = 0.0)
 {
     public bool AllFinite =>
         double.IsFinite(AppearanceMaturity) &&
@@ -173,7 +174,8 @@ public readonly record struct RegionGene(
         double.IsFinite(PhotosyntheticExpression) &&
         double.IsFinite(FeedingExpression) &&
         double.IsFinite(DigestiveExpression) &&
-        double.IsFinite(DecomposerExpression);
+        double.IsFinite(DecomposerExpression) &&
+        double.IsFinite(AirExchangeAffinity);
 }
 
 public sealed class Genome
@@ -228,7 +230,8 @@ public sealed class Genome
             0.25, 0.20, 0.50, 0.55, 0.45,
             0.62, 0.32, 0.58, 0.48, 0.55) with
             { PhotosyntheticExpression = 0.76, FeedingExpression = 0.10,
-                DigestiveExpression = 0.18, DecomposerExpression = 0.0 },
+                DigestiveExpression = 0.18, DecomposerExpression = 0.0,
+                AirExchangeAffinity = 0.0 },
         new RegionGene(
             1, 0, 0, 0, false,
             0.20, 1.10, 0.35, -0.60, 0.72, 0.34, -0.18, 0.72,
@@ -236,7 +239,8 @@ public sealed class Genome
             0.35, 0.25, 0.45, 0.30, 0.25,
             0.78, 0.18, 0.66, 0.24, 0.72) with
             { PhotosyntheticExpression = 0.84, FeedingExpression = 0.08,
-                DigestiveExpression = 0.16, DecomposerExpression = 0.0 },
+                DigestiveExpression = 0.16, DecomposerExpression = 0.0,
+                AirExchangeAffinity = 0.0 },
         new RegionGene(
             2, 0, 0, 0, false,
             0.45, 0.70, 0.50, 0.80, 0.48, 0.22, 0.24, 0.80,
@@ -244,7 +248,8 @@ public sealed class Genome
             0.75, 0.35, 0.60, 0.65, 0.65,
             0.48, 0.55, 0.42, 0.72, 0.46) with
             { PhotosyntheticExpression = 0.68, FeedingExpression = 0.12,
-                DigestiveExpression = 0.20, DecomposerExpression = 0.0 }
+                DigestiveExpression = 0.20, DecomposerExpression = 0.0,
+                AirExchangeAffinity = 0.0 }
     ],
     mutationRate: 0.28,
     metabolism: MetabolicGene.AquaticAncestor,
@@ -324,6 +329,7 @@ public sealed class Genome
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.FeedingExpression)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.DigestiveExpression)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.DecomposerExpression)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(region.AirExchangeAffinity)));
         }
 
         FingerprintHash.Add(ref hash, unchecked((ulong)_sensors.Length));
@@ -477,7 +483,8 @@ public static class GenomeValidator
             , region.ExchangeExpression, region.BarrierExpression, region.ContractileExpression,
             region.StructuralExpression, region.SensoryExpression, region.CavityFraction,
             region.CavityAperture, region.JointMobility, region.PhotosyntheticExpression,
-            region.FeedingExpression, region.DigestiveExpression, region.DecomposerExpression
+            region.FeedingExpression, region.DigestiveExpression, region.DecomposerExpression,
+            region.AirExchangeAffinity
         ];
         if (materialValues.Any(value => value is < 0.0 or > 1.0))
             throw new InvalidOperationException($"Region {region.RegionId} has a material value outside 0-1.");
@@ -818,7 +825,7 @@ public sealed class GenomeMutator
         // traits. Mostly local changes, with occasional larger inherited steps;
         // the resulting body still has to pay for its growth and maintenance.
         int property = random.NextUnitDouble() < 0.55
-            ? random.NextInt(8) : 8 + random.NextInt(23);
+            ? random.NextInt(8) : 8 + random.NextInt(24);
         MutationStep step = SampleScalarStep(random);
         double delta = step.SignedFraction;
         double sizeFactor = Math.Exp(step.SignedFraction);
@@ -855,6 +862,7 @@ public sealed class GenomeMutator
             27 => gene with { FeedingExpression = ReflectRange(gene.FeedingExpression + delta, 0.0, 1.0) },
             28 => gene with { DigestiveExpression = ReflectRange(gene.DigestiveExpression + delta, 0.0, 1.0) },
             29 => gene with { DecomposerExpression = ReflectRange(gene.DecomposerExpression + delta, 0.0, 1.0) },
+            30 => gene with { AirExchangeAffinity = ReflectRange(gene.AirExchangeAffinity + delta, 0.0, 1.0) },
             _ when !gene.IsCore => gene with { AppearanceMaturity = ReflectRange(gene.AppearanceMaturity + delta, 0.0, 0.95) },
             _ => gene with { SensoryExpression = ReflectRange(gene.SensoryExpression + delta, 0.0, 1.0) }
         };

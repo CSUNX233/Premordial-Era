@@ -47,6 +47,7 @@ public readonly record struct OrganismPresentationState(
     public int Generation { get; init; }
     public int BirthMutationCount { get; init; }
     public double OffspringMutationProbability { get; init; }
+    public double HypoxiaShortfallLastStep { get; init; }
     public double LightEnergyLastStep { get; init; }
     public double OrganicFeedingLastStep { get; init; }
     public double DecompositionLastStep { get; init; }

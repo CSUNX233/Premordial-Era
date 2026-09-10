@@ -326,9 +326,10 @@ public sealed class SimulationWorld
             RegionalMetabolismResult metabolism = RegionalPhysiology.ReactAndMaintain(
                 organism.Body, genome, _environment, organism.Position, _config, dt);
             organism.OxygenConsumedLastStep = metabolism.OxygenConsumed;
+            organism.HypoxiaShortfallLastStep = metabolism.HypoxiaShortfall;
             organism.MetabolicEnergyLastStep = metabolism.EnergyProduced;
             CumulativeOxygenConsumed += metabolism.OxygenConsumed;
-            CumulativeDissipatedEnergy += metabolism.MaintenancePaid;
+            CumulativeDissipatedEnergy += metabolism.MaintenancePaid + metabolism.HeatDissipated;
             organism.Hydration = RegionalPhysiology.BodyHydration(organism.Body, genome);
             double excess = organism.Body.LimitTotalEnergy(_config.MaximumEnergy);
             CumulativeDissipatedEnergy += excess;
@@ -480,6 +481,7 @@ public sealed class SimulationWorld
                 Generation=o.Generation,ExplorationDrive=o.ExplorationDrive,
                 BirthMutationCount=o.BirthMutationCount,
                 LightEnergyLastStep=o.LightEnergyLastStep,
+                HypoxiaShortfallLastStep=o.HypoxiaShortfallLastStep,
                 OrganicFeedingLastStep=o.OrganicFeedingLastStep,
                 DecompositionLastStep=o.DecompositionLastStep,
                 PrimaryProductionLastStep=o.PrimaryProductionLastStep,
@@ -1321,7 +1323,7 @@ public sealed class SimulationWorld
                              r.InternalSignal,r.TransportAvailability,r.Activation,r.ExchangeExpression,
                              r.BarrierExpression,r.ContractileExpression,r.StructuralExpression,r.SensoryExpression,
                              r.PhotosyntheticExpression,r.FeedingExpression,r.DigestiveExpression,
-                             r.DecomposerExpression })
+                             r.DecomposerExpression,r.AirExchangeExpression })
                     FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(value)));
             }
             foreach(double value in o.SensorState)

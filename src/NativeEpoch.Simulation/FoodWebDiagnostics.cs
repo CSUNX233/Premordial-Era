@@ -148,7 +148,10 @@ public static class FoodWebDiagnostics
 
     private static (bool Lethal, bool SizeIndependent, bool Recovery) VerifyMaintenanceFailure(SimulationConfig config)
     {
-        Genome genome = new([TestGene()], 0.0);
+        // This fixture isolates energy-maintenance failure. A zero oxygen-use
+        // metabolism prevents acute hypoxia from contaminating that assertion.
+        Genome genome = new([TestGene()], 0.0,
+            MetabolicGene.AquaticAncestor with { OxygenUseFraction = 0.0 });
         FixedEnvironment environment = new(0.0);
         double mass = BodyCalculator.TargetMatter(genome.Regions[0]);
         DevelopingBody small = new(genome, mass * 0.01, 0, 0, 0, mass * 0.01);

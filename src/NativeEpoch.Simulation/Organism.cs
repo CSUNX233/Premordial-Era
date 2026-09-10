@@ -22,6 +22,7 @@ public struct Organism
     public int OccludedSurfaceSamples;
     public double OxygenUptakeLastStep;
     public double OxygenConsumedLastStep;
+    public double HypoxiaShortfallLastStep;
     public double MetabolicEnergyLastStep;
     public double LightEnergyLastStep;
     public double OrganicFeedingLastStep;
@@ -94,6 +95,7 @@ public struct Organism
         double.IsFinite(AirExposedArea) && AirExposedArea >= 0.0 &&
         ExposedSurfaceSamples >= 0 && OccludedSurfaceSamples >= 0 &&
         double.IsFinite(OxygenUptakeLastStep) && OxygenUptakeLastStep >= 0.0 &&
+        double.IsFinite(HypoxiaShortfallLastStep) && HypoxiaShortfallLastStep >= 0.0 &&
         double.IsFinite(OxygenConsumedLastStep) && OxygenConsumedLastStep >= 0.0 &&
         double.IsFinite(MetabolicEnergyLastStep) && MetabolicEnergyLastStep >= 0.0 &&
         double.IsFinite(LightEnergyLastStep) && LightEnergyLastStep >= 0.0 &&

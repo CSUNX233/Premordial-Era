@@ -34,7 +34,7 @@ public static class AquaticFounderFactory
                 CavityFraction=0,CavityAperture=0,JointRestPitch=0,JointMobility=0,
                 PhotosyntheticExpression=Range(0.68,0.94),
                 FeedingExpression=Range(0.05,0.18),DigestiveExpression=Range(0.12,0.28),
-                DecomposerExpression=0.0
+                DecomposerExpression=0.0,AirExchangeAffinity=0.0
             };
         }
 

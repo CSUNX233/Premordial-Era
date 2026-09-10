@@ -47,7 +47,8 @@ public readonly record struct RegionalMetabolismResult(
     double EnergyProduced,
     double WasteProduced,
     double MaintenancePaid,
-    double HypoxiaShortfall);
+    double HypoxiaShortfall,
+    double HeatDissipated = 0.0);
 
 public readonly record struct OrganicDigestionResult(
     double OfferedOrganic,
@@ -307,9 +308,12 @@ public static class RegionalPhysiology
                     gene, genome.Metabolism,
                     Math.Clamp(region.Water / waterCapacity, 0.0, 1.0)).OxygenPermeability*
                     expressionGate;
+                double mediumExchange = waterSide
+                    ? 1.0
+                    : region.AirExchangeExpression * airDryingFactor;
                 double oxygenFlux = surface.AreaWeight * oxygenPermeability * mediumCoefficient /
                     Math.Max(geometry.ExchangeDistance, 0.04) *
-                    (outsidePotential - oxygenConcentration) * deltaSeconds;
+                    mediumExchange * (outsidePotential - oxygenConcentration) * deltaSeconds;
                 if (oxygenFlux > 0.0)
                 {
                     double room = Math.Max(0.0, oxygenCapacity - (region.Oxygen + delta.Oxygen));
@@ -566,6 +570,7 @@ public static class RegionalPhysiology
         double waste = 0.0;
         double maintenancePaid = 0.0;
         double hypoxia = 0.0;
+        double heatDissipated = 0.0;
         int regionCount = body.RegionCount;
         for (int regionIndex = 0; regionIndex < regionCount; regionIndex++)
         {
@@ -581,26 +586,58 @@ public static class RegionalPhysiology
             // only near the target so a viable metabolism can actually recharge,
             // while still stopping substrate burn when local energy is full.
             double demand = Math.Clamp(energyRoom / Math.Max(0.05, energyTarget * 0.25), 0.0, 1.0);
-            double catalyticRate = config.MetabolicSubstratePerSecond *
+            double catalyticCapacity = config.MetabolicSubstratePerSecond *
                 (0.20 + (0.80 * gene.CatalyticActivity)) * snapshot.Matter * deltaSeconds * demand;
-            double aerobicDemand = Math.Min(snapshot.Substrate, catalyticRate) *
+            double basalCatalyticCapacity = config.MetabolicSubstratePerSecond *
+                (0.20 + (0.80 * gene.CatalyticActivity)) * snapshot.Matter * deltaSeconds;
+            double regulatedAerobicDemand = Math.Min(snapshot.Substrate, catalyticCapacity) *
                 genome.Metabolism.OxygenUseFraction;
+            // Oxygen-dependent tissue still needs a local oxygen potential while
+            // stored energy is full or substrate is temporarily absent. Actual
+            // chemical turnover below remains substrate-gated and ledger-balanced.
+            double basalAerobicRequirement = basalCatalyticCapacity *
+                genome.Metabolism.OxygenUseFraction * config.BasalAerobicDemandFraction;
+            double reactiveBasalDemand = Math.Min(snapshot.Substrate, basalAerobicRequirement);
+            double aerobicDemand = Math.Max(regulatedAerobicDemand, reactiveBasalDemand);
             double aerobicByOxygen = snapshot.Oxygen / config.OxygenPerAerobicSubstrate;
             double aerobic = Math.Min(aerobicDemand, aerobicByOxygen);
-            hypoxia += Math.Max(0.0, aerobicDemand - aerobic);
+            double physiologicalAerobicDemand = Math.Max(
+                regulatedAerobicDemand, basalAerobicRequirement);
+            double regionalHypoxia = Math.Max(
+                0.0, physiologicalAerobicDemand - aerobicByOxygen);
+            hypoxia += regionalHypoxia;
+            if (basalCatalyticCapacity > 1e-12)
+            {
+                // Normalizing by total catalytic capacity keeps hypoxia tolerance
+                // evolvable: a smaller oxygen-use fraction accumulates less damage,
+                // while a truly anaerobic metabolism accumulates none.
+                double oxygenDeficit = Math.Clamp(
+                    regionalHypoxia / basalCatalyticCapacity, 0.0, 1.0);
+                double substrateDeficit = Math.Clamp(
+                    Math.Max(0.0, basalAerobicRequirement - snapshot.Substrate) /
+                    basalCatalyticCapacity, 0.0, 1.0);
+                // Fuel shortage is kept distinct from hypoxia and progresses on
+                // the ordinary maintenance timescale, so one oxygen inventory
+                // cannot stand in for endless essential aerobic turnover.
+                body.AddDamage(snapshot.RegionId,
+                    (oxygenDeficit * deltaSeconds / config.HypoxiaFailureSeconds) +
+                    (substrateDeficit * deltaSeconds / config.MaintenanceFailureSeconds));
+            }
             double anaerobicCapacity = Math.Min(
                 snapshot.Substrate - aerobic,
-                catalyticRate * (1.0 - genome.Metabolism.OxygenUseFraction));
+                catalyticCapacity * (1.0 - genome.Metabolism.OxygenUseFraction));
             double anaerobic = Math.Max(0.0, anaerobicCapacity);
-            double producedEnergy =
-                (aerobic * config.AerobicEnergyPerSubstrate *
-                    (0.30 + (0.70 * genome.Metabolism.OxygenCatalysis))) +
-                (anaerobic * config.AnaerobicEnergyPerSubstrate *
-                    (1.0 - (0.35 * genome.Metabolism.OxygenCatalysis)));
-            double execution = producedEnergy > 0.0 ? Math.Min(1.0, energyRoom / producedEnergy) : 0.0;
-            aerobic *= execution;
-            anaerobic *= execution;
-            producedEnergy *= execution;
+            double aerobicEnergy = aerobic * config.AerobicEnergyPerSubstrate *
+                (0.30 + (0.70 * genome.Metabolism.OxygenCatalysis));
+            double storedAerobicEnergy = Math.Min(energyRoom, aerobicEnergy);
+            heatDissipated += Math.Max(0.0, aerobicEnergy - storedAerobicEnergy);
+            double remainingEnergyRoom = Math.Max(0.0, energyRoom - storedAerobicEnergy);
+            double anaerobicEnergy = anaerobic * config.AnaerobicEnergyPerSubstrate *
+                (1.0 - (0.35 * genome.Metabolism.OxygenCatalysis));
+            double anaerobicExecution = anaerobicEnergy > 0.0
+                ? Math.Min(1.0, remainingEnergyRoom / anaerobicEnergy) : 0.0;
+            anaerobic *= anaerobicExecution;
+            double producedEnergy = storedAerobicEnergy + (anaerobicEnergy * anaerobicExecution);
             double usedSubstrate = aerobic + anaerobic;
             double usedOxygen = aerobic * config.OxygenPerAerobicSubstrate;
             body.ApplyInventoryDelta(snapshot.RegionId, new RegionalInventoryDelta(
@@ -620,7 +657,7 @@ public static class RegionalPhysiology
                         updated.ContractileExpression+updated.StructuralExpression+
                         updated.SensoryExpression+updated.PhotosyntheticExpression+
                         updated.FeedingExpression+updated.DigestiveExpression+
-                        updated.DecomposerExpression)))) * deltaSeconds;
+                        updated.DecomposerExpression+updated.AirExchangeExpression)))) * deltaSeconds;
             double paid = Math.Min(updated.Energy, maintenance);
             body.ApplyInventoryDelta(updated.RegionId, new RegionalInventoryDelta(0.0, 0.0, 0.0, -paid));
             maintenancePaid += paid;
@@ -635,7 +672,7 @@ public static class RegionalPhysiology
         environment.DepositMetabolicWaste(position, waste);
         return new RegionalMetabolismResult(
             substrateConsumed, oxygenConsumed, energyProduced, waste,
-            maintenancePaid, hypoxia);
+            maintenancePaid, hypoxia, heatDissipated);
     }
 
     private static void AddBidirectionalRequest(

@@ -49,12 +49,13 @@ internal static class HeadlessProgram
             bool diagnoseVision = args.Contains("--diagnose-vision");
             bool diagnoseAppendage = args.Contains("--diagnose-appendage");
             bool diagnoseCavity = args.Contains("--diagnose-cavity");
+            bool diagnoseAirRespiration = args.Contains("--diagnose-air-respiration");
             bool diagnoseFounders = args.Contains("--diagnose-founders");
             bool diagnosePrecision = args.Contains("--diagnose-precision");
             bool diagnoseWorldPrecision = args.Contains("--diagnose-world-precision");
             bool diagnoseDistribution = args.Contains("--diagnose-mutation-distribution");
             bool diagnoseVerticalMotion = args.Contains("--diagnose-vertical-motion");
-            Options options = Options.Parse(args.Where(a => a != "--diagnose-sphere" && a != "--diagnose-food-web" && a != "--diagnose-land-resources" && a != "--diagnose-sensing-behavior" && a != "--diagnose-photosynthesis" && a != "--diagnose-ecology" && a != "--diagnose-movement" && a != "--diagnose-competition" && a != "--diagnose-tissue" && a != "--diagnose-vision" && a != "--diagnose-appendage" && a != "--diagnose-cavity" && a != "--diagnose-founders" && a != "--diagnose-precision" && a != "--diagnose-world-precision" && a != "--diagnose-mutation-distribution" && a != "--diagnose-vertical-motion").ToArray());
+            Options options = Options.Parse(args.Where(a => a != "--diagnose-sphere" && a != "--diagnose-food-web" && a != "--diagnose-land-resources" && a != "--diagnose-sensing-behavior" && a != "--diagnose-photosynthesis" && a != "--diagnose-ecology" && a != "--diagnose-movement" && a != "--diagnose-competition" && a != "--diagnose-tissue" && a != "--diagnose-vision" && a != "--diagnose-appendage" && a != "--diagnose-cavity" && a != "--diagnose-air-respiration" && a != "--diagnose-founders" && a != "--diagnose-precision" && a != "--diagnose-world-precision" && a != "--diagnose-mutation-distribution" && a != "--diagnose-vertical-motion").ToArray());
             if (options.ShowHelp)
             {
                 PrintHelp();
@@ -169,6 +170,13 @@ internal static class HeadlessProgram
                 CavityPhysiologyDiagnosticResult result=CavityPhysiologyDiagnostics.Run();
                 Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
                 Console.WriteLine(result.Passed?"CAVITY PASS":"CAVITY FAIL");
+                return result.Passed?0:1;
+            }
+            if(diagnoseAirRespiration)
+            {
+                AirRespirationDiagnosticResult result=AirRespirationDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed?"AIR RESPIRATION PASS":"AIR RESPIRATION FAIL");
                 return result.Passed?0:1;
             }
             if (diagnoseMovement)
@@ -545,8 +553,11 @@ internal static class HeadlessProgram
             System.Numerics.Vector2.Zero, config, 1);
         RegionalMetabolismResult working = RegionalPhysiology.ReactAndMaintain(hungry, genome, environment,
             System.Numerics.Vector2.Zero, config, 1);
-        return resting.SubstrateConsumed == 0 && resting.OxygenConsumed == 0 &&
-            working.SubstrateConsumed > 0 && working.EnergyProduced > 0 &&
+        // A full energy store still pays essential aerobic turnover, dissipating
+        // its output as heat; additional demand must increase substrate use.
+        return resting.SubstrateConsumed > 0 && resting.OxygenConsumed > 0 &&
+            resting.EnergyProduced == 0 && resting.HeatDissipated > 0 &&
+            working.SubstrateConsumed > resting.SubstrateConsumed && working.EnergyProduced > 0 &&
             Math.Abs(resting.SubstrateConsumed + working.SubstrateConsumed - environment.TotalMetabolicWaste) < 1e-10;
     }
 

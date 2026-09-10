@@ -834,7 +834,7 @@ public sealed partial class Stage3Main : Node3D
             $"身体物质 {organism.Body.TotalMatter:F3} · 质量 {organism.Body.PhysicalMass:F3} · 半径 {organism.Body.BoundingRadius:F3}\n" +
             $"有效光合面 {organism.Body.PhotosyntheticSurface:F3} · 摄取面 {organism.Body.MatterUptakeSurface:F3} · 维护 {organism.Body.MaintenanceEnergyPerSecond:F3}/s\n" +
             $"介质 {(organism.Immersion >= 0.8 ? "水中" : organism.Immersion > 0.05 ? "水线" : "陆地")} · 个体深度 {organism.Depth:F2}/{organism.Environment.WaterDepth:F2} · 浸没 {organism.Immersion:P0} · 升降速度 {organism.VerticalVelocity:+0.000;-0.000;0.000}（+上浮）\n" +
-            $"含水 {organism.Hydration:P1} · 区域氧 {organism.InternalOxygen:F4}/{organism.OxygenCapacity:F4} · 本步摄氧/耗氧 {organism.OxygenUptakeLastStep:F5}/{organism.OxygenConsumedLastStep:F5}\n" +
+            $"含水 {organism.Hydration:P1} · 空气交换表达 {organism.RegionInventories.Average(region => region.AirExchangeExpression):F3} · 区域氧 {organism.InternalOxygen:F4}/{organism.OxygenCapacity:F4} · 本步摄氧/耗氧 {organism.OxygenUptakeLastStep:F5}/{organism.OxygenConsumedLastStep:F5} · 缺氧缺口 {organism.HypoxiaShortfallLastStep:E2}\n" +
             $"本步光合储能/代谢产能 {organism.LightEnergyLastStep:F5}/{organism.MetabolicEnergyLastStep:F5} · 失水/压力代价 {organism.DehydrationCostLastStep:F5}\n" +
             $"本步生产/摄食/分解/捕食 {organism.PrimaryProductionLastStep:E1}/{organism.OrganicFeedingLastStep:E1}/{organism.DecompositionLastStep:E1}/{organism.PredationLastStep:E1}\n" +
             $"表面样本 外露/遮蔽 {organism.ExposedSurfaceSamples}/{organism.OccludedSurfaceSamples} · 水/气暴露面 {organism.WaterExposedArea:F3}/{organism.AirExposedArea:F3}\n" +

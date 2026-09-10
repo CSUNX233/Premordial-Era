@@ -70,6 +70,8 @@ public sealed record SimulationConfig
     public double AerobicEnergyPerSubstrate { get; init; } = 9.0;
     public double AnaerobicEnergyPerSubstrate { get; init; } = 2.3;
     public double MetabolicSubstratePerSecond { get; init; } = 0.075;
+    public double BasalAerobicDemandFraction { get; init; } = 0.50;
+    public double HypoxiaFailureSeconds { get; init; } = 6.0;
     public double ControllerNodeEnergyPerSecond { get; init; } = 0.0001;
     public double ControllerActivationEnergyPerSecond { get; init; } = 0.00083;
     public double SensorEnergyPerSlotPerSecond { get; init; } = 0.00013;
@@ -118,6 +120,9 @@ public sealed record SimulationConfig
             throw new InvalidOperationException("Mineral assimilation must cost at least the maximum substrate energy yield.");
         if (ExplorationActivityFloor is > 1.0 || ForagingRestEnergyFraction is >= 1.0)
             throw new InvalidOperationException("Foraging activity and rest fractions must stay below one.");
+        if (!double.IsFinite(BasalAerobicDemandFraction) ||
+            BasalAerobicDemandFraction is <= 0.0 or > 1.0)
+            throw new InvalidOperationException("Basal aerobic demand fraction must be within 0-1.");
 
         double[] finitePositive =
         [
@@ -139,7 +144,8 @@ public sealed record SimulationConfig
             MinimumAquaticSpawnDepth, AncestorInternalOxygen, InternalOxygenCapacityPerMatter,
             WaterOxygenTransferCoefficient, AirOxygenTransferCoefficient,
             OxygenPerAerobicSubstrate, AerobicEnergyPerSubstrate, AnaerobicEnergyPerSubstrate,
-            MetabolicSubstratePerSecond, ControllerNodeEnergyPerSecond,
+            MetabolicSubstratePerSecond, BasalAerobicDemandFraction, HypoxiaFailureSeconds,
+            ControllerNodeEnergyPerSecond,
             ControllerActivationEnergyPerSecond, SensorEnergyPerSlotPerSecond,
             LocalActuationEnergyScale, SecretionMatterPerSecond,
             SecretionEnergyPerMatter, VerticalContractionAcceleration,
