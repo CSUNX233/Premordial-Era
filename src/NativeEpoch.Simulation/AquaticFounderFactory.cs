@@ -31,7 +31,10 @@ public static class AquaticFounderFactory
                 ExchangeExpression=Range(0.60,0.85),BarrierExpression=Range(0.15,0.32),
                 ContractileExpression=Range(0.38,0.65),StructuralExpression=Range(0.25,0.48),
                 SensoryExpression=Range(0.48,0.72),
-                CavityFraction=0,CavityAperture=0,JointRestPitch=0,JointMobility=0
+                CavityFraction=0,CavityAperture=0,JointRestPitch=0,JointMobility=0,
+                PhotosyntheticExpression=Range(0.68,0.94),
+                FeedingExpression=Range(0.05,0.18),DigestiveExpression=Range(0.12,0.28),
+                DecomposerExpression=Range(0.02,0.10)
             };
         }
 

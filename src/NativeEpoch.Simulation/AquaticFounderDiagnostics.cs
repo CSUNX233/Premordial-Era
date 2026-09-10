@@ -9,6 +9,7 @@ public readonly record struct AquaticFounderDiagnosticResult(
     bool AllInitialAquaticDepthsLegal,
     bool AllInitialAgeAndMaturityZero,
     bool NoAdvancedFounderOrgans,
+    bool InitialPhotosyntheticProducers,
     bool ExplicitFounderStayedUniform,
     double SharedMatterBudgetDifference,
     long ObservationSteps,
@@ -74,6 +75,9 @@ public static class AquaticFounderDiagnostics
                     region.JointRestPitch == 0.0 && region.JointMobility == 0.0) &&
                 genome.Sensors.All(sensor => sensor.Channel != SensorChannel.DirectionalLight);
         });
+        bool photosyntheticProducers = first.Organisms.All(organism =>
+            first.Genomes.Get(organism.GenomeId).Regions.All(region =>
+                region.PhotosyntheticExpression > 0.0));
 
         Genome explicitFounder = Genome.CreateAncestor();
         SimulationWorld explicitWorld = new(config, PrimarySeed, FounderCount, explicitFounder);
@@ -103,11 +107,11 @@ public static class AquaticFounderDiagnostics
 
         bool passed = sameSeed && differentSeed &&
             distinctGenomes > 1 && distinctCoreGeometries > 1 && distinctRegionCounts > 1 &&
-            legalDepths && initialLifeState && noAdvancedOrgans && explicitUniform &&
+            legalDepths && initialLifeState && noAdvancedOrgans && photosyntheticProducers && explicitUniform &&
             matterDifference <= matterTolerance && inheritanceExact && observed.Population > 0 &&
             observed.AllFinite && observed.StepIndex == MaximumObservationSteps;
         return new(sameSeed, differentSeed, distinctGenomes, distinctCoreGeometries,
-            distinctRegionCounts, legalDepths, initialLifeState, noAdvancedOrgans, explicitUniform,
+            distinctRegionCounts, legalDepths, initialLifeState, noAdvancedOrgans, photosyntheticProducers, explicitUniform,
             matterDifference, observed.StepIndex, observed.CumulativeBirths, observed.Population,
             inheritanceExact, passed);
     }

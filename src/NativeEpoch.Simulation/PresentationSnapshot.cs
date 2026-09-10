@@ -47,6 +47,11 @@ public readonly record struct OrganismPresentationState(
     public int Generation { get; init; }
     public int BirthMutationCount { get; init; }
     public double OffspringMutationProbability { get; init; }
+    public double LightEnergyLastStep { get; init; }
+    public double OrganicFeedingLastStep { get; init; }
+    public double DecompositionLastStep { get; init; }
+    public double PrimaryProductionLastStep { get; init; }
+    public double PredationLastStep { get; init; }
     public double ExplorationDrive { get; init; }
     public double ForagingTrend { get; init; }
     public int ContactNeighborCount { get; init; }
@@ -88,4 +93,5 @@ public sealed class WorldPresentationSnapshot
 
     public SimulationSnapshot Statistics { get; }
     public IReadOnlyList<OrganismPresentationState> Organisms { get; }
+    public EnvironmentResourceSnapshot? Resources { get; init; }
 }

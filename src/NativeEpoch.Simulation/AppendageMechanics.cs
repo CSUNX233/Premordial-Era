@@ -74,6 +74,7 @@ public sealed class AppendageMechanics
     public const int MaximumContacts = 8;
     private const double Gravity = 9.81;
     private const double MinimumConnection = 1e-4;
+    private const double MechanicalEnergyUnitsPerEcosystemEnergy = 30.0;
     private static readonly IComparer<AppendageRegionPose> FootComparer = new DescendingSupportComparer();
     private readonly Dictionary<int, double> _jointPitch = [];
     // Previous body-local planar tips: body translation/heading must not be mistaken for joint slip.
@@ -334,7 +335,10 @@ public sealed class AppendageMechanics
             (double vx, double vy, double requestedAngularVelocity) = Solve3(_normal, _rhs, _solveMatrix);
             Vector2 requestedVelocity = new((float)vx, (float)vy);
             double mass = Math.Max(0.05, body.Cache.PhysicalMass);
-            double energySpeedLimit = Math.Sqrt(Math.Max(0.0, 2.0 * contactEnergySpent / mass));
+            // Configured work is expressed in the rescaled ecosystem energy unit.
+            // Convert it back to the mechanical unit used by the speed bound.
+            double energySpeedLimit = Math.Sqrt(Math.Max(0.0,
+                2.0 * MechanicalEnergyUnitsPerEcosystemEnergy * contactEnergySpent / mass));
             double tractionSpeedLimit = totalTraction /
                 (mass * Math.Max(1.0, config.LandFrictionMultiplier));
             double speedLimit = Math.Min(config.MaximumMovementSpeed,

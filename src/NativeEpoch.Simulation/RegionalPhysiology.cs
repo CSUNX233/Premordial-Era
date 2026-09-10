@@ -14,7 +14,18 @@ public readonly record struct RegionalExchangeResult(
     double WaterExposedArea,
     double AirExposedArea,
     int ExposedSamples,
-    int OccludedSamples)
+    int OccludedSamples,
+    double AbsorbedLight = 0.0,
+    double PhotosyntheticHeat = 0.0,
+    double PhotosyntheticMaintenance = 0.0,
+    double PhotosynthesizedSubstrate = 0.0,
+    double MineralConsumed = 0.0,
+    double OrganicConsumed = 0.0,
+    double OrganicAssimilated = 0.0,
+    double DetritusDecomposed = 0.0,
+    double MineralsReturned = 0.0,
+    double FoodDemand = 0.0,
+    double FoodConsumed = 0.0)
 {
     public double Immersion => WaterExposedArea + AirExposedArea > 0.0
         ? WaterExposedArea / (WaterExposedArea + AirExposedArea)
@@ -38,10 +49,101 @@ public readonly record struct RegionalMetabolismResult(
     double MaintenancePaid,
     double HypoxiaShortfall);
 
+public readonly record struct OrganicDigestionResult(
+    double OfferedOrganic,
+    double ProcessedOrganic,
+    double AssimilatedSubstrate,
+    double UnprocessedOrganic,
+    double DigestionWaste,
+    double EnergySpent);
+
+public readonly record struct DecompositionResult(
+    double OfferedDetritus,
+    double AssimilatedSubstrate,
+    double ReturnedMinerals,
+    double RejectedDetritus,
+    double EnergySpent);
+
 public static class RegionalPhysiology
 {
+    private const double OngoingEnergyCostScale = 1.0 / 30.0;
     private const double WaterOxygenPotentialScale = 0.55;
     private const double AirOxygenPotentialScale = 1.0;
+    private const double OrganicDigestionEnergyPerMatter = 0.18;
+    private const double OrganicFeedingRateScale = 10.0;
+    private const double DigestiveThroughputPerCapacity = 1.5;
+
+    public static double FeedingCapacity(DevelopingBody body, Genome genome) =>
+        body.Cache.FeedingSurface;
+
+    public static double DecompositionCapacity(DevelopingBody body, Genome genome) =>
+        body.Cache.DecomposerSurface;
+
+    public static OrganicDigestionResult DigestOrganicToSubstrate(
+        DevelopingBody body,
+        Genome genome,
+        double offeredOrganic,
+        double deltaSeconds)
+    {
+        if (!double.IsFinite(offeredOrganic) || offeredOrganic < 0.0)
+            throw new ArgumentOutOfRangeException(nameof(offeredOrganic));
+        if (!double.IsFinite(deltaSeconds) || deltaSeconds <= 0.0)
+            throw new ArgumentOutOfRangeException(nameof(deltaSeconds));
+        double processLimit = Math.Min(offeredOrganic,
+            body.Cache.DigestiveCapacity * DigestiveThroughputPerCapacity * deltaSeconds);
+        double remaining = processLimit;
+        double processedTotal = 0.0;
+        double assimilated = 0.0;
+        double energySpent = 0.0;
+        for (int index = 0; index < body.Regions.Count && remaining > 1e-12; index++)
+        {
+            BodyRegion region = body.Regions[index];
+            RegionGene gene = genome.GetRegion(region.RegionId);
+            double machinery = region.DigestiveExpression *
+                (0.25 + (0.75 * gene.CatalyticActivity)) *
+                (0.25 + (0.75 * region.TransportAvailability));
+            if (machinery <= 1e-12) continue;
+            // Expression limits throughput. Once machinery exists, material quality
+            // controls yield so low expression is slow rather than intrinsically futile.
+            double efficiency = Math.Clamp(0.35 +
+                (0.45 * gene.CatalyticActivity * (0.25 + (0.75 * region.TransportAvailability))),
+                0.35, 0.85);
+            double room = Math.Max(0.0, SubstrateCapacity(region, gene) - region.Substrate);
+            double requested = Math.Min(remaining, Math.Min(
+                region.Matter * machinery * DigestiveThroughputPerCapacity * deltaSeconds,
+                room / Math.Max(1e-12, efficiency)));
+            double requestedEnergy = requested * OrganicDigestionEnergyPerMatter;
+            double paid = body.ConsumeRegionEnergy(region.RegionId, requestedEnergy);
+            double execution = requestedEnergy > 1e-12 ? paid / requestedEnergy : 0.0;
+            double processed = requested * Math.Clamp(execution, 0.0, 1.0);
+            double stored = processed * efficiency;
+            if (stored > 0.0)
+                body.ApplyInventoryDelta(region.RegionId, new RegionalInventoryDelta(stored, 0.0, 0.0, 0.0));
+            remaining -= processed;
+            processedTotal += processed;
+            assimilated += stored;
+            energySpent += paid;
+        }
+        return new(offeredOrganic, processedTotal, assimilated,
+            Math.Max(0.0, offeredOrganic - processedTotal),
+            Math.Max(0.0, processedTotal - assimilated), energySpent);
+    }
+
+    public static DecompositionResult DecomposeDetritus(
+        DevelopingBody body,
+        Genome genome,
+        double offeredDetritus,
+        double deltaSeconds)
+    {
+        if (!double.IsFinite(offeredDetritus) || offeredDetritus < 0.0)
+            throw new ArgumentOutOfRangeException(nameof(offeredDetritus));
+        double gate = Math.Clamp(DecompositionCapacity(body, genome), 0.0, double.MaxValue);
+        double admitted = Math.Min(offeredDetritus, gate * 0.20 * deltaSeconds);
+        OrganicDigestionResult digestion = DigestOrganicToSubstrate(body, genome, admitted, deltaSeconds);
+        double mineralized = Math.Max(0.0, digestion.ProcessedOrganic - digestion.AssimilatedSubstrate);
+        return new(offeredDetritus, digestion.AssimilatedSubstrate, mineralized,
+            Math.Max(0.0, offeredDetritus - digestion.ProcessedOrganic), digestion.EnergySpent);
+    }
 
     public static double OxygenCapacity(BodyRegion region, SimulationConfig config) =>
         0.04 + (region.Matter * config.InternalOxygenCapacityPerMatter);
@@ -74,27 +176,34 @@ public static class RegionalPhysiology
     public static double EstimateMatterDemand(
         DevelopingBody body,Genome genome,double lightEnergyAllowance,
         SimulationConfig config,double deltaSeconds)
+        => 0.0;
+
+    public static double EstimateMineralDemand(
+        DevelopingBody body, Genome genome, double lightAbsorptionAllowance,
+        SimulationConfig config, double deltaSeconds)
     {
-        double requested=0.0;
-        foreach(BodyFunctionalGeometry geometry in body.FunctionalGeometry)
-        {
-            BodyRegion region=body.GetRegion(geometry.RegionId);
-            RegionGene gene=genome.GetRegion(geometry.RegionId);
-            double gap=Math.Max(0.0,SubstrateCapacity(region,gene)-region.Substrate);
-            double expressionGate=EffectiveExchange(region);
-            double gate=gene.Permeability*expressionGate*geometry.MatterTransportEfficiency*
-                (0.30+(0.70*region.TransportAvailability))*
-                (1.0/(1.0+(0.55*genome.Metabolism.OxygenCatalysis)));
-            double exposure=Math.Max(0.0,geometry.ExposedSurface);
-            requested+=gap*(1.0-Math.Exp(-gate*exposure*
-                config.MatterUptakePerSurfacePerSecond*deltaSeconds));
-        }
-        double maintenanceReserve=(config.BaseMaintenanceEnergyPerSecond+
-            body.Cache.MaintenanceEnergyPerSecond)*deltaSeconds;
-        double energyAvailable=Math.Max(0.0,body.TotalEnergy+
-            Math.Max(0.0,lightEnergyAllowance)-maintenanceReserve);
-        return Math.Min(requested,energyAvailable/config.MatterAssimilationEnergyPerMatter);
+        if (body.Cache.PhotosyntheticSurface <= 0.0 || lightAbsorptionAllowance <= 0.0)
+            return 0.0;
+        double room = 0.0;
+        foreach (BodyRegion region in body.Regions)
+            room += Math.Max(0.0, SubstrateCapacity(region, genome.GetRegion(region.RegionId)) - region.Substrate);
+        return Math.Min(room, Math.Max(0.0, lightAbsorptionAllowance) * 0.96 /
+            config.MatterAssimilationEnergyPerMatter);
     }
+
+    public static double EstimateOrganicDemand(
+        DevelopingBody body, Genome genome, SimulationConfig config, double deltaSeconds)
+    {
+        double room = 0.0;
+        foreach (BodyRegion region in body.Regions)
+            room += Math.Max(0.0, SubstrateCapacity(region, genome.GetRegion(region.RegionId)) - region.Substrate);
+        return Math.Min(room, FeedingCapacity(body, genome) *
+            config.MatterUptakePerSurfacePerSecond * OrganicFeedingRateScale * deltaSeconds);
+    }
+
+    public static double EstimateDetritusDemand(
+        DevelopingBody body, Genome genome, double deltaSeconds) =>
+        DecompositionCapacity(body, genome) * 0.20 * deltaSeconds;
 
     public static RegionalExchangeResult ExchangeWithEnvironment(
         DevelopingBody body,
@@ -108,24 +217,25 @@ public static class RegionalPhysiology
         Func<int, int, bool>? surfaceEnabled = null,
         double lightEnergyAllowance = double.PositiveInfinity,
         MatterReservation? matterReservation = null,
-        double matterDemand = double.NaN)
+        double matterDemand = double.NaN,
+        MineralReservation? mineralReservation = null,
+        OrganicReservation? organicReservation = null,
+        DetritusReservation? detritusReservation = null)
     {
         double oxygenUptake = 0.0;
         double oxygenReleased = 0.0;
         double substrateUptake = 0.0;
-        double rawSubstrateDemand=0.0;
         double waterUptake = 0.0;
         double waterLost = 0.0;
         double lightEnergy = 0.0;
+        double absorbedLight = 0.0;
+        double photosyntheticHeat = 0.0;
+        double photosyntheticMaintenance = 0.0;
+        double photosynthesizedSubstrate = 0.0;
+        double mineralConsumed = 0.0;
+        double remainingMinerals = mineralReservation?.Total ?? 0.0;
         double remainingLight = lightEnergyAllowance;
-        if(!double.IsFinite(matterDemand))
-            matterDemand=matterReservation.HasValue
-                ? EstimateMatterDemand(body,genome,lightEnergyAllowance,config,deltaSeconds)
-                : 0.0;
-        double remainingMatter=matterReservation?.Total??double.PositiveInfinity;
-        double reservationFraction=matterReservation.HasValue&&matterDemand>0.0
-            ?Math.Min(1.0,matterReservation.Value.Total/matterDemand):
-            (matterReservation.HasValue?0.0:1.0);
+        if(!double.IsFinite(matterDemand)) matterDemand=0.0;
         double assimilationEnergy = 0.0;
         double waterArea = 0.0;
         double airArea = 0.0;
@@ -148,6 +258,7 @@ public static class RegionalPhysiology
             double substrateCapacity = SubstrateCapacity(region, gene);
             double oxygenConcentration = oxygenCapacity > 0.0 ? region.Oxygen / oxygenCapacity : 0.0;
             double barrier = 1.0 - (0.78 * genome.Metabolism.WaterRetention);
+            double regionalHeatMaintenanceDemand = 0.0;
 
             for (int surfaceIndex = 0; surfaceIndex < geometry.SurfaceSamples.Count; surfaceIndex++)
             {
@@ -221,37 +332,31 @@ public static class RegionalPhysiology
                 }
 
                 double lightFacing = 0.20 + (0.80 * Math.Max(0.0, surface.LocalNormal.Y));
-                double requestedLight = surfaceEnvironment.Light * surface.AreaWeight *
-                    gene.LightReactivity * lightFacing * config.LightEnergyPerSurfacePerSecond * deltaSeconds;
-                double gainedLight = Math.Min(requestedLight, Math.Max(0.0, remainingLight));
-                remainingLight -= gainedLight;
-                delta = delta with { Energy = delta.Energy + gainedLight };
-                lightEnergy += gainedLight;
-
-                double matterGate = gene.Permeability * expressionGate * geometry.MatterTransportEfficiency *
-                    (0.30 + (0.70 * region.TransportAvailability)) *
-                    (1.0 / (1.0 + (0.55 * genome.Metabolism.OxygenCatalysis)));
-                double matterRequest = Math.Max(0.0, substrateCapacity - (region.Substrate + delta.Substrate)) *
-                    matterGate * surface.AreaWeight * config.MatterUptakePerSurfacePerSecond * deltaSeconds;
-                double maintenanceReserve = ((config.BaseMaintenanceEnergyPerSecond *
-                        region.Matter / Math.Max(0.05, body.Cache.TotalMatter)) +
-                    (region.Matter * (0.02 + (0.025 * gene.SignalConductivity)))) * deltaSeconds;
-                matterRequest = Math.Min(matterRequest,
-                    Math.Max(0.0, region.Energy + delta.Energy - maintenanceReserve) /
-                    config.MatterAssimilationEnergyPerMatter);
-                rawSubstrateDemand+=matterRequest;
-                double receivedMatter=matterReservation.HasValue
-                    ?Math.Min(remainingMatter,matterRequest*reservationFraction)
-                    :environment.WithdrawMatter(samplePosition,matterRequest);
-                remainingMatter-=receivedMatter;
-                double assimilationCost = receivedMatter * config.MatterAssimilationEnergyPerMatter;
-                delta = delta with
-                {
-                    Substrate = delta.Substrate + receivedMatter,
-                    Energy = delta.Energy - assimilationCost
-                };
-                substrateUptake += receivedMatter;
-                assimilationEnergy += assimilationCost;
+                double requestedAbsorption = surfaceEnvironment.Light * surface.AreaWeight *
+                    region.PhotosyntheticExpression * lightFacing *
+                    config.LightEnergyPerSurfacePerSecond * deltaSeconds;
+                double absorbed = Math.Min(requestedAbsorption, Math.Max(0.0, remainingLight));
+                remainingLight -= absorbed;
+                double conversionEfficiency = 0.72 + (0.24 * gene.CatalyticActivity);
+                double potentialChemicalEnergy = absorbed * conversionEfficiency;
+                double synthesisRoom = Math.Max(0.0,
+                    substrateCapacity - (region.Substrate + delta.Substrate));
+                double synthesized = Math.Min(remainingMinerals, Math.Min(synthesisRoom,
+                    potentialChemicalEnergy / config.MatterAssimilationEnergyPerMatter));
+                double storedChemicalEnergy = synthesized * BilinearEnvironmentField.FoodWebEnergyPerMatter;
+                remainingMinerals -= synthesized;
+                double wasteHeat = absorbed - storedChemicalEnergy;
+                double thermalRetention = waterSide ? 0.18 : 0.62;
+                double ambientHeatStress = Math.Clamp((surfaceEnvironment.Temperature - 0.70) / 0.50, 0.0, 1.0);
+                regionalHeatMaintenanceDemand += wasteHeat * OngoingEnergyCostScale *
+                    (0.08 + (0.18 * thermalRetention) + (0.14 * ambientHeatStress));
+                delta = delta with { Substrate = delta.Substrate + synthesized };
+                absorbedLight += absorbed;
+                photosyntheticHeat += wasteHeat;
+                lightEnergy += storedChemicalEnergy;
+                photosynthesizedSubstrate += synthesized;
+                mineralConsumed += synthesized;
+                substrateUptake += synthesized;
 
                 if (waterSide)
                 {
@@ -272,16 +377,61 @@ public static class RegionalPhysiology
                     waterLost += evaporated;
                 }
             }
+            double heatMaintenancePaid = Math.Min(
+                Math.Max(0.0, region.Energy + delta.Energy), regionalHeatMaintenanceDemand);
+            delta = delta with { Energy = delta.Energy - heatMaintenancePaid };
+            photosyntheticMaintenance += heatMaintenancePaid;
             body.ApplyInventoryDelta(geometry.RegionId, delta);
+            double heatMaintenanceShortfall = regionalHeatMaintenanceDemand - heatMaintenancePaid;
+            if (heatMaintenanceShortfall > 1e-12)
+                body.AddDamage(geometry.RegionId,
+                    Math.Clamp(heatMaintenanceShortfall / Math.Max(0.05, region.Matter) * 0.02, 0.0, 1.0));
         }
 
-        if(matterReservation.HasValue&&remainingMatter>0.0)
-            environment.ReturnMatter(matterReservation.Value,remainingMatter);
+        if(matterReservation.HasValue)
+            environment.ReturnMatter(matterReservation.Value,matterReservation.Value.Total);
+        if(mineralReservation.HasValue&&remainingMinerals>0.0)
+            environment.ReturnMinerals(mineralReservation.Value,remainingMinerals);
+
+        double organicConsumed = 0.0;
+        double organicAssimilated = 0.0;
+        if(organicReservation.HasValue)
+        {
+            OrganicDigestionResult digestion=DigestOrganicToSubstrate(
+                body,genome,organicReservation.Value.Total,deltaSeconds);
+            organicConsumed=digestion.ProcessedOrganic;
+            organicAssimilated=digestion.AssimilatedSubstrate;
+            assimilationEnergy+=digestion.EnergySpent;
+            substrateUptake+=digestion.AssimilatedSubstrate;
+            double unprocessed=organicReservation.Value.Total-digestion.ProcessedOrganic;
+            if(unprocessed>0.0)environment.ReturnOrganic(organicReservation.Value,unprocessed);
+            double waste=digestion.ProcessedOrganic-digestion.AssimilatedSubstrate;
+            if(waste>0.0)environment.DepositMetabolicWaste(organismPosition,waste);
+        }
+        double detritusDecomposed = 0.0;
+        double mineralsReturned = 0.0;
+        if(detritusReservation.HasValue)
+        {
+            DecompositionResult decomposition=DecomposeDetritus(
+                body,genome,detritusReservation.Value.Total,deltaSeconds);
+            detritusDecomposed=decomposition.OfferedDetritus-decomposition.RejectedDetritus;
+            mineralsReturned=decomposition.ReturnedMinerals;
+            substrateUptake+=decomposition.AssimilatedSubstrate;
+            assimilationEnergy+=decomposition.EnergySpent;
+            if(decomposition.RejectedDetritus>0.0)
+                environment.ReturnDetritus(detritusReservation.Value,decomposition.RejectedDetritus);
+            if(decomposition.ReturnedMinerals>0.0)
+                environment.DepositMinerals(organismPosition,decomposition.ReturnedMinerals);
+        }
 
         return new RegionalExchangeResult(
             oxygenUptake, oxygenReleased, substrateUptake,
-            matterReservation.HasValue?matterDemand:rawSubstrateDemand, waterUptake, waterLost,
-            lightEnergy, assimilationEnergy, waterArea, airArea, exposedSamples, occludedSamples);
+            matterDemand, waterUptake, waterLost,
+            lightEnergy, assimilationEnergy, waterArea, airArea, exposedSamples, occludedSamples,
+            absorbedLight, photosyntheticHeat, photosyntheticMaintenance,
+            photosynthesizedSubstrate,mineralConsumed,organicConsumed,organicAssimilated,
+            detritusDecomposed,mineralsReturned,matterDemand,
+            mineralConsumed+organicConsumed+detritusDecomposed);
     }
 
     private static double EffectiveExchange(BodyRegion region) =>
@@ -407,7 +557,6 @@ public static class RegionalPhysiology
         SimulationConfig config,
         double deltaSeconds)
     {
-        Dictionary<int, RegionGene> genes = genome.Regions.ToDictionary(gene => gene.RegionId);
         double substrateConsumed = 0.0;
         double oxygenConsumed = 0.0;
         double energyProduced = 0.0;
@@ -425,7 +574,10 @@ public static class RegionalPhysiology
             // at a fixed rate while photosynthesis has already filled the reserve.
             double energyTarget = regionalEnergyCapacity * 0.65;
             double energyRoom = Math.Max(0.0, energyTarget - snapshot.Energy);
-            double demand = Math.Clamp(energyRoom / Math.Max(0.05, energyTarget * 0.5), 0.0, 1.0);
+            // Keep respiration available through the reproduction reserve. Taper
+            // only near the target so a viable metabolism can actually recharge,
+            // while still stopping substrate burn when local energy is full.
+            double demand = Math.Clamp(energyRoom / Math.Max(0.05, energyTarget * 0.25), 0.0, 1.0);
             double catalyticRate = config.MetabolicSubstratePerSecond *
                 (0.20 + (0.80 * gene.CatalyticActivity)) * snapshot.Matter * deltaSeconds * demand;
             double aerobicDemand = Math.Min(snapshot.Substrate, catalyticRate) *
@@ -459,12 +611,13 @@ public static class RegionalPhysiology
             waste += usedSubstrate;
 
             BodyRegion updated = body.GetRegion(snapshot.RegionId);
-            double maintenance = ((config.BaseMaintenanceEnergyPerSecond *
-                    updated.Matter / Math.Max(0.05, body.Cache.TotalMatter)) +
-                (updated.Matter * (0.02 + (0.025 * gene.SignalConductivity) +
-                    0.018*(updated.ExchangeExpression+updated.BarrierExpression+
+            double maintenance = ((config.BaseMaintenanceEnergyPerSecond * updated.Matter) +
+                (updated.Matter * (0.00067 + (0.00083 * gene.SignalConductivity) +
+                    0.0006*(updated.ExchangeExpression+updated.BarrierExpression+
                         updated.ContractileExpression+updated.StructuralExpression+
-                        updated.SensoryExpression)))) * deltaSeconds;
+                        updated.SensoryExpression+updated.PhotosyntheticExpression+
+                        updated.FeedingExpression+updated.DigestiveExpression+
+                        updated.DecomposerExpression)))) * deltaSeconds;
             double paid = Math.Min(updated.Energy, maintenance);
             body.ApplyInventoryDelta(updated.RegionId, new RegionalInventoryDelta(0.0, 0.0, 0.0, -paid));
             maintenancePaid += paid;

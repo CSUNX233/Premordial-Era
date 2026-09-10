@@ -12,7 +12,11 @@ public readonly record struct TissueSensingResult(
     int ActiveVisualSensorCount,
     double VisionSignal,
     double TemperatureSignal,
-    double PressureSignal);
+    double PressureSignal,
+    double ChemicalRange,
+    double VisualForwardSignal,
+    double VisualLateralSignal,
+    double VisualAccess);
 
 /// <summary>
 /// Converts bounded, local environment queries into signals only when a developed,
@@ -33,7 +37,10 @@ public static class TissueSensing
         if(controllerNodeInputs.Length!=nodeCount)controllerNodeInputs=new double[nodeCount];
         else Array.Clear(controllerNodeInputs);
 
-        double energySpent=0,chemical=0,contact=0,chemicalAccess=0,light=0,vision=0,temperature=0,pressure=0;
+        double energySpent=0,chemical=0,contact=0,chemicalAccess=0,chemicalRangeWeighted=0,
+            light=0,vision=0,visualForward=0,visualLateral=0,visualAccess=0,
+            temperature=0,pressure=0;
+        double chemicalAccessWeight=0;
         int active=0,activeVisual=0,chemicalCount=0,contactCount=0,lightCount=0,visionCount=0,temperatureCount=0,pressureCount=0;
         double c=Math.Cos(headingRadians),s=Math.Sin(headingRadians);
         Span<Vector2> positions=stackalloc Vector2[GenomeValidator.MaximumRegions];
@@ -63,7 +70,9 @@ public static class TissueSensing
             EnvironmentSample sample=samples[bodyIndex];
             double raw=sensor.Channel switch
             {
-                SensorChannel.ChemicalResource=>Math.Clamp((sample.Minerals+sample.Detritus)/2.0,0.0,1.0),
+                SensorChannel.ChemicalResource=>Math.Clamp((sample.Minerals*region.PhotosyntheticExpression+
+                    (sample.ProducerBiomass+sample.EdibleOrganics)*region.FeedingExpression*region.DigestiveExpression+
+                    sample.Detritus*region.DecomposerExpression)/2.0,0.0,1.0),
                 SensorChannel.ContactPressure=>Math.Clamp(contactPressure,0.0,1.0),
                 SensorChannel.InternalEnergy=>Math.Clamp(region.Energy/Math.Max(0.1,config.MaximumEnergy),0.0,1.0),
                 SensorChannel.Hydration=>Math.Clamp(region.Water/Math.Max(0.1,
@@ -79,14 +88,20 @@ public static class TissueSensing
                 geometry.SignalTransportEfficiency,0.0,1.0);
             if(sensor.Channel==SensorChannel.DirectionalLight)
                 availability*=Math.Clamp(sourceGene.LightReactivity*(0.25+0.75*sensor.DirectionalSelectivity),0.0,1.0);
-            double probeCount=sensor.Channel is SensorChannel.ChemicalResource or SensorChannel.DirectionalLight?4.0:1.0;
+            // Four directional probes are represented by one bounded world query here.
+            // Longer reach retains a higher tissue/processing cost instead of being free.
+            double probeCount=sensor.Channel is SensorChannel.ChemicalResource or SensorChannel.DirectionalLight
+                ?3.0+Math.Clamp(sensor.Range/12.0,0.0,1.0):1.0;
             double requested=config.SensorEnergyPerSlotPerSecond*deltaSeconds*availability*probeCount*
                 (0.30+0.70*Math.Abs(raw));
             double paid=body.ConsumeRegionEnergy(region.RegionId,requested);
             energySpent+=paid;
             double paidFraction=requested>1e-12?Math.Clamp(paid/requested,0.0,1.0):0.0;
             double effective=raw*sensor.Gain*availability*paidFraction;
-            double blend=1.0-Math.Exp(-sensor.ResponseRate*deltaSeconds);
+            // An unpaid receptor keeps only a brief physical response tail; it cannot
+            // provide a persistent signal without continuing to spend energy.
+            double responseRate=paidFraction>1e-6?sensor.ResponseRate:Math.Max(4.0,sensor.ResponseRate);
+            double blend=1.0-Math.Exp(-responseRate*deltaSeconds);
             sensorState[index]=Math.Clamp(sensorState[index]+((effective-sensorState[index])*blend),-1.0,1.0);
             controllerNodeInputs[sensor.TargetControllerNodeIndex]+=sensorState[index];
             if(availability*paidFraction>0.05)
@@ -97,12 +112,27 @@ public static class TissueSensing
                     ControllerNodeGene target=genome.ControllerNodes[sensor.TargetControllerNodeIndex];
                     double controlReach=Math.Clamp((Math.Abs(target.ContractionOutputWeight)+
                         Math.Abs(target.LateralContractionOutputWeight)+0.5*Math.Abs(target.VerticalContractionOutputWeight))/1.5,0.0,1.0);
+                    double chemicalMotorAccess=availability*paidFraction*Math.Min(1.0,Math.Abs(sensor.Gain))*controlReach;
                     chemical+=sensorState[index];
-                    chemicalAccess+=availability*paidFraction*Math.Min(1.0,Math.Abs(sensor.Gain))*controlReach;
+                    chemicalAccess+=chemicalMotorAccess;
+                    chemicalRangeWeighted+=sensor.Range*chemicalMotorAccess;
+                    chemicalAccessWeight+=chemicalMotorAccess;
                     chemicalCount++;break;
                 case SensorChannel.ContactPressure:contact+=sensorState[index];contactCount++;break;
                 case SensorChannel.AmbientLight:light+=sensorState[index];lightCount++;break;
-                case SensorChannel.DirectionalLight:vision+=sensorState[index];visionCount++;break;
+                case SensorChannel.DirectionalLight:
+                    ControllerNodeGene visualTarget=genome.ControllerNodes[sensor.TargetControllerNodeIndex];
+                    double visualMotorReach=Math.Clamp((Math.Abs(visualTarget.ContractionOutputWeight)+
+                        Math.Abs(visualTarget.LateralContractionOutputWeight)+
+                        0.5*Math.Abs(visualTarget.VerticalContractionOutputWeight))/1.5,0.0,1.0);
+                    double localAngle=Math.Atan2(geometry.Direction.Y,geometry.Direction.X)+
+                        sensor.DirectionOffsetRadians;
+                    double effectiveVisual=sensorState[index]*visualMotorReach;
+                    vision+=sensorState[index];
+                    visualForward+=effectiveVisual*Math.Cos(localAngle);
+                    visualLateral+=effectiveVisual*Math.Sin(localAngle);
+                    visualAccess+=availability*paidFraction*Math.Min(1.0,Math.Abs(sensor.Gain))*visualMotorReach;
+                    visionCount++;break;
                 case SensorChannel.Temperature:temperature+=sensorState[index];temperatureCount++;break;
                 case SensorChannel.Pressure:pressure+=sensorState[index];pressureCount++;break;
             }
@@ -110,7 +140,10 @@ public static class TissueSensing
         return new TissueSensingResult(energySpent,active,
             Mean(chemical,chemicalCount),Mean(contact,contactCount),Mean(chemicalAccess,chemicalCount),
             Mean(light,lightCount),activeVisual,Mean(vision,visionCount),
-            Mean(temperature,temperatureCount),Mean(pressure,pressureCount));
+            Mean(temperature,temperatureCount),Mean(pressure,pressureCount),
+            chemicalAccessWeight>1e-12?chemicalRangeWeighted/chemicalAccessWeight:0.0,
+            Mean(visualForward,visionCount),Mean(visualLateral,visionCount),
+            Mean(visualAccess,visionCount));
     }
 
     private static double DirectionalLight(DevelopingBody body,BodyFunctionalGeometry sourceRegion,

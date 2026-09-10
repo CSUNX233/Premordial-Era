@@ -11,6 +11,7 @@ public sealed partial class Stage3Hud : CanvasLayer
     private Button _pause = null!;
     private PanelContainer _toolPanel = null!;
     private PanelContainer _inspectorPanel = null!;
+    private PanelContainer _timePanel = null!;
     private bool _compactLayout;
     private int _layoutBand = -1;
 
@@ -40,6 +41,12 @@ public sealed partial class Stage3Hud : CanvasLayer
     {
         _ = delta;
         ApplyResponsiveLayout(GetViewport().GetVisibleRect().Size.X, force: false);
+        float contentTop = _timePanel.OffsetTop + _timePanel.Size.Y + 12;
+        if (Math.Abs(_toolPanel.OffsetTop - contentTop) > 0.5f)
+        {
+            _toolPanel.OffsetTop = contentTop;
+            _inspectorPanel.OffsetTop = contentTop;
+        }
     }
 
     public void UpdateStatistics(string text)
@@ -80,6 +87,7 @@ public sealed partial class Stage3Hud : CanvasLayer
             CustomMinimumSize = new Vector2(0, 52)
         };
         AddChild(panel);
+        _timePanel = panel;
         FadeIn(panel);
 
         VBoxContainer root = new();
@@ -96,6 +104,7 @@ public sealed partial class Stage3Hud : CanvasLayer
         {
             Text = "准备模拟…",
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Center
         };
@@ -164,7 +173,7 @@ public sealed partial class Stage3Hud : CanvasLayer
 
         Label help = new()
         {
-            Text = "W前进 / S后退 · 右键拖动旋转 · 滚轮缩放\n[ / ] 调笔刷 · F2 形态样本台 · F11 全屏 · Tab 隐藏界面\n\n2A 已接入水深、分介质氧和区域运输；基础运动仍等待 2B 局部连接传力。",
+            Text = "W前进 / S后退 · 右键拖动旋转 · 滚轮缩放\n[ / ] 调笔刷 · F2 形态样本台 · F11 全屏 · Tab 隐藏界面\n\n绿植与水藻属于可摄食生物量。观察生产、摄食、分解和捕食通量；图鉴收藏不会直接改变基因。",
             AutowrapMode = TextServer.AutowrapMode.WordSmart
         };
         help.AddThemeColorOverride("font_color", new Color("aebccc"));

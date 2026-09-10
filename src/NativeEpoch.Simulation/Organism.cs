@@ -23,6 +23,12 @@ public struct Organism
     public double OxygenUptakeLastStep;
     public double OxygenConsumedLastStep;
     public double MetabolicEnergyLastStep;
+    public double LightEnergyLastStep;
+    public double OrganicFeedingLastStep;
+    public double DecompositionLastStep;
+    public double PrimaryProductionLastStep;
+    public double PredationLastStep;
+    public double PredationEnergyLastStep;
     public double DehydrationCostLastStep;
     public double ContactPressure;
     public int ContactNeighborCount;
@@ -84,6 +90,12 @@ public struct Organism
         double.IsFinite(OxygenUptakeLastStep) && OxygenUptakeLastStep >= 0.0 &&
         double.IsFinite(OxygenConsumedLastStep) && OxygenConsumedLastStep >= 0.0 &&
         double.IsFinite(MetabolicEnergyLastStep) && MetabolicEnergyLastStep >= 0.0 &&
+        double.IsFinite(LightEnergyLastStep) && LightEnergyLastStep >= 0.0 &&
+        double.IsFinite(OrganicFeedingLastStep) && OrganicFeedingLastStep >= 0 &&
+        double.IsFinite(DecompositionLastStep) && DecompositionLastStep >= 0 &&
+        double.IsFinite(PrimaryProductionLastStep) && PrimaryProductionLastStep >= 0 &&
+        double.IsFinite(PredationLastStep) && PredationLastStep >= 0 &&
+        double.IsFinite(PredationEnergyLastStep) && PredationEnergyLastStep >= 0 &&
         double.IsFinite(DehydrationCostLastStep) && DehydrationCostLastStep >= 0.0 &&
         double.IsFinite(ContactPressure) && ContactPressure >= 0.0 &&
         ContactNeighborCount>=0&&

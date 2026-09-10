@@ -103,10 +103,7 @@ public static class BodyGeometryBuilder
             if(Vector2.DistanceSquared(start,end)>1e-12f)
                 angle=Math.Atan2(end.Y-start.Y,end.X-start.X);
             double analytic = volume;
-            Vector3 color = new(
-                (float)(0.18 + (0.68 * gene.Pigment)),
-                (float)(0.20 + (0.65 * gene.LightReactivity)),
-                (float)(0.22 + (0.58 * gene.Permeability)));
+            Vector3 color = GeneColor(gene);
             BodyGeometryRegion region = new(gene.RegionId, gene.ParentRegionId, start, end, angle,
                 Vector2.Distance(start, end), startRadius, endRadius, verticalAspect,
                 gene.Curvature, gene.Roundness, analytic, color);
@@ -140,6 +137,37 @@ public static class BodyGeometryBuilder
         return new BodyGeometry(Array.AsReadOnly(regions), expected, actual,
             connected, connected && regions.All(r => r.IsFinite), key);
     }
+
+    private static Vector3 GeneColor(RegionGene gene)
+    {
+        // Continuous genetic colour: nearby pigment/material genes stay related,
+        // while independently inherited founders remain visually distinguishable.
+        double hue=Fraction((0.71*gene.Pigment)+(0.17*gene.LightReactivity)+
+            (0.09*gene.Permeability)+(0.037*gene.RegionId));
+        double saturation=Math.Clamp(0.48+(0.32*gene.Pigment)+
+            (0.12*gene.BarrierExpression),0.42,0.90);
+        double value=Math.Clamp(0.56+(0.25*gene.LightReactivity)+
+            (0.10*(1.0-gene.Density)),0.48,0.92);
+        return HsvToRgb(hue,saturation,value);
+    }
+
+    private static Vector3 HsvToRgb(double hue,double saturation,double value)
+    {
+        double scaled=Fraction(hue)*6.0;
+        int sector=(int)Math.Floor(scaled);
+        double fraction=scaled-sector;
+        double p=value*(1.0-saturation);
+        double q=value*(1.0-(saturation*fraction));
+        double t=value*(1.0-(saturation*(1.0-fraction)));
+        (double r,double g,double b)=sector switch
+        {
+            0=>(value,t,p),1=>(q,value,p),2=>(p,value,t),
+            3=>(p,q,value),4=>(t,p,value),_=>(value,p,q)
+        };
+        return new Vector3((float)r,(float)g,(float)b);
+    }
+
+    private static double Fraction(double value)=>value-Math.Floor(value);
 }
 
 public static class MorphologyGenomeFactory

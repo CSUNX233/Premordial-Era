@@ -18,7 +18,11 @@ public readonly record struct BodyRegion(
     double BarrierExpression = 0.3,
     double ContractileExpression = 0.5,
     double StructuralExpression = 0.5,
-    double SensoryExpression = 0.3)
+    double SensoryExpression = 0.3,
+    double PhotosyntheticExpression = 0.0,
+    double FeedingExpression = 0.0,
+    double DigestiveExpression = 0.0,
+    double DecomposerExpression = 0.0)
 {
     public bool AllFinite =>
         RegionId >= 0 && double.IsFinite(Matter) && Matter > 0.0 &&
@@ -35,7 +39,11 @@ public readonly record struct BodyRegion(
         double.IsFinite(BarrierExpression) && BarrierExpression is >= 0.0 and <= 1.0 &&
         double.IsFinite(ContractileExpression) && ContractileExpression is >= 0.0 and <= 1.0 &&
         double.IsFinite(StructuralExpression) && StructuralExpression is >= 0.0 and <= 1.0 &&
-        double.IsFinite(SensoryExpression) && SensoryExpression is >= 0.0 and <= 1.0;
+        double.IsFinite(SensoryExpression) && SensoryExpression is >= 0.0 and <= 1.0 &&
+        double.IsFinite(PhotosyntheticExpression) && PhotosyntheticExpression is >= 0.0 and <= 1.0 &&
+        double.IsFinite(FeedingExpression) && FeedingExpression is >= 0.0 and <= 1.0 &&
+        double.IsFinite(DigestiveExpression) && DigestiveExpression is >= 0.0 and <= 1.0 &&
+        double.IsFinite(DecomposerExpression) && DecomposerExpression is >= 0.0 and <= 1.0;
 }
 
 public readonly record struct BodyVisualRegion(
@@ -89,7 +97,11 @@ public readonly record struct BodyCache(
     double MaximumActivationEnergyPerSecond,
     double BoundingRadius,
     double MatterConnectivity,
-    double SignalConnectivity)
+    double SignalConnectivity,
+    double PhotosyntheticSurface = 0.0,
+    double FeedingSurface = 0.0,
+    double DigestiveCapacity = 0.0,
+    double DecomposerSurface = 0.0)
 {
     public bool AllFinite =>
         double.IsFinite(TotalMatter) &&
@@ -110,7 +122,11 @@ public readonly record struct BodyCache(
         double.IsFinite(MaximumActivationEnergyPerSecond) &&
         double.IsFinite(BoundingRadius) &&
         double.IsFinite(MatterConnectivity) &&
-        double.IsFinite(SignalConnectivity);
+        double.IsFinite(SignalConnectivity) &&
+        double.IsFinite(PhotosyntheticSurface) && PhotosyntheticSurface >= 0.0 &&
+        double.IsFinite(FeedingSurface) && FeedingSurface >= 0.0 &&
+        double.IsFinite(DigestiveCapacity) && DigestiveCapacity >= 0.0 &&
+        double.IsFinite(DecomposerSurface) && DecomposerSurface >= 0.0;
 }
 
 public sealed class DevelopingBody
@@ -142,7 +158,8 @@ public sealed class DevelopingBody
             throw new ArgumentOutOfRangeException(nameof(initialSubstrate));
         double development=coreMatter/target;
         double expressionTotal=core.ExchangeExpression+core.BarrierExpression+core.ContractileExpression+
-            core.StructuralExpression+core.SensoryExpression;
+            core.StructuralExpression+core.SensoryExpression+core.PhotosyntheticExpression+
+            core.FeedingExpression+core.DigestiveExpression+core.DecomposerExpression;
         double expressionScale=expressionTotal>2.15?2.15/expressionTotal:1.0;
         _regions.Add(new BodyRegion(
             core.RegionId,
@@ -157,7 +174,11 @@ public sealed class DevelopingBody
             core.BarrierExpression*expressionScale*development,
             core.ContractileExpression*expressionScale*development,
             core.StructuralExpression*expressionScale*development,
-            core.SensoryExpression*expressionScale*development));
+            core.SensoryExpression*expressionScale*development,
+            core.PhotosyntheticExpression*expressionScale*development,
+            core.FeedingExpression*expressionScale*development,
+            core.DigestiveExpression*expressionScale*development,
+            core.DecomposerExpression*expressionScale*development));
         RebuildGeometry(genome);
     }
 
@@ -273,7 +294,11 @@ public sealed class DevelopingBody
                 bodyIndex >= 0 ? _regions[bodyIndex].BarrierExpression : gene.BarrierExpression*localDevelopment,
                 bodyIndex >= 0 ? _regions[bodyIndex].ContractileExpression : gene.ContractileExpression*localDevelopment,
                 bodyIndex >= 0 ? _regions[bodyIndex].StructuralExpression : gene.StructuralExpression*localDevelopment,
-                bodyIndex >= 0 ? _regions[bodyIndex].SensoryExpression : gene.SensoryExpression*localDevelopment);
+                bodyIndex >= 0 ? _regions[bodyIndex].SensoryExpression : gene.SensoryExpression*localDevelopment,
+                bodyIndex >= 0 ? _regions[bodyIndex].PhotosyntheticExpression : gene.PhotosyntheticExpression*localDevelopment,
+                bodyIndex >= 0 ? _regions[bodyIndex].FeedingExpression : gene.FeedingExpression*localDevelopment,
+                bodyIndex >= 0 ? _regions[bodyIndex].DigestiveExpression : gene.DigestiveExpression*localDevelopment,
+                bodyIndex >= 0 ? _regions[bodyIndex].DecomposerExpression : gene.DecomposerExpression*localDevelopment);
             if (bodyIndex >= 0)
                 _regions[bodyIndex] = updated;
             else
@@ -289,6 +314,7 @@ public sealed class DevelopingBody
             // lets only the derived surface quadrature/visual skeleton lag by one fixed
             // step during smooth growth; a new region always rebuilds immediately.
             Cache = BodyCalculator.Recalculate(genome, _regions);
+            RefreshExpressionDerivedCache(genome);
             _growthGeometryAge++;
             _growthGeometryPending = true;
             if (topologyChanged || _growthGeometryAge >= _precision.GrowthGeometryRefreshIntervalSteps)
@@ -369,9 +395,14 @@ public sealed class DevelopingBody
                 BarrierExpression = Blend(region.BarrierExpression, expression.Barrier, expressionBlend),
                 ContractileExpression = Blend(region.ContractileExpression, expression.Contractile, expressionBlend),
                 StructuralExpression = Blend(region.StructuralExpression, expression.Structural, expressionBlend),
-                SensoryExpression = Blend(region.SensoryExpression, expression.Sensory, expressionBlend)
+                SensoryExpression = Blend(region.SensoryExpression, expression.Sensory, expressionBlend),
+                PhotosyntheticExpression = Blend(region.PhotosyntheticExpression, expression.Photosynthetic, expressionBlend),
+                FeedingExpression = Blend(region.FeedingExpression, expression.Feeding, expressionBlend),
+                DigestiveExpression = Blend(region.DigestiveExpression, expression.Digestive, expressionBlend),
+                DecomposerExpression = Blend(region.DecomposerExpression, expression.Decomposer, expressionBlend)
             };
         }
+        RefreshExpressionDerivedCache(genome);
     }
 
     public void ApplyInventoryDelta(int regionId, RegionalInventoryDelta delta)
@@ -403,6 +434,12 @@ public sealed class DevelopingBody
     public double ConsumeSubstrate(double requested) => ConsumeInventory(requested, InventoryKind.Substrate);
     public double ConsumeOxygen(double requested) => ConsumeInventory(requested, InventoryKind.Oxygen);
     public double ConsumeWater(double requested) => ConsumeInventory(requested, InventoryKind.Water);
+
+    /// <summary>
+    /// Removes only stored organic substrate. Structural body matter stays intact;
+    /// contact damage and eventual corpse detritus are accounted by the world.
+    /// </summary>
+    public double ExtractEdibleSubstrate(double requested) => ConsumeSubstrate(requested);
 
     public double ConsumeRegionEnergy(int regionId, double requested)
     {
@@ -472,22 +509,29 @@ public sealed class DevelopingBody
                     BarrierExpression=Blend(region.BarrierExpression,expression.Barrier,expressionBlend),
                     ContractileExpression=contractileExpression,
                     StructuralExpression=Blend(region.StructuralExpression,expression.Structural,expressionBlend),
-                    SensoryExpression=Blend(region.SensoryExpression,expression.Sensory,expressionBlend)};
+                    SensoryExpression=Blend(region.SensoryExpression,expression.Sensory,expressionBlend),
+                    PhotosyntheticExpression=Blend(region.PhotosyntheticExpression,expression.Photosynthetic,expressionBlend),
+                    FeedingExpression=Blend(region.FeedingExpression,expression.Feeding,expressionBlend),
+                    DigestiveExpression=Blend(region.DigestiveExpression,expression.Digestive,expressionBlend),
+                    DecomposerExpression=Blend(region.DecomposerExpression,expression.Decomposer,expressionBlend)};
         }
+        RefreshExpressionDerivedCache(genome);
     }
 
     private static double Blend(double current,double target,double amount) =>
         Math.Clamp(current+((target-current)*amount),0.0,1.0);
 
     private readonly record struct ExpressionTargets(
-        double Exchange,double Barrier,double Contractile,double Structural,double Sensory)
+        double Exchange,double Barrier,double Contractile,double Structural,double Sensory,
+        double Photosynthetic,double Feeding,double Digestive,double Decomposer)
     {
         public static ExpressionTargets For(RegionGene gene,double development,double transport,double signal)
         {
             // A region has a shared expression capacity. Pushing every program high
             // dilutes each one as well as increasing construction/maintenance cost.
             double total=gene.ExchangeExpression+gene.BarrierExpression+gene.ContractileExpression+
-                gene.StructuralExpression+gene.SensoryExpression;
+                gene.StructuralExpression+gene.SensoryExpression+gene.PhotosyntheticExpression+
+                gene.FeedingExpression+gene.DigestiveExpression+gene.DecomposerExpression;
             double budgetScale=total>2.15?2.15/total:1.0;
             double availability=Math.Clamp(development*(0.20+0.80*transport),0.0,1.0);
             double signalModulation=0.82+0.18*((signal+1.0)*0.5);
@@ -496,7 +540,11 @@ public sealed class DevelopingBody
                 gene.BarrierExpression*budgetScale*availability,
                 gene.ContractileExpression*budgetScale*availability*signalModulation,
                 gene.StructuralExpression*budgetScale*availability,
-                gene.SensoryExpression*budgetScale*availability*signalModulation);
+                gene.SensoryExpression*budgetScale*availability*signalModulation,
+                gene.PhotosyntheticExpression*budgetScale*availability,
+                gene.FeedingExpression*budgetScale*availability*signalModulation,
+                gene.DigestiveExpression*budgetScale*availability,
+                gene.DecomposerExpression*budgetScale*availability);
         }
     }
 
@@ -557,6 +605,7 @@ public sealed class DevelopingBody
             PosedFunctionalGeometry[index] = RestFunctionalGeometry[index] with { SurfaceSamples = samples };
         }
         FunctionalGeometry = PosedFunctionalGeometry;
+        RefreshExpressionDerivedCache(genome);
         _poseGeometryDirty = true;
         _growthGeometryAge = 0;
         _growthGeometryPending = false;
@@ -620,7 +669,59 @@ public sealed class DevelopingBody
         Energy
     }
 
-    public BodyCache Recalculate(Genome genome) => BodyCalculator.Recalculate(genome, _regions);
+    public BodyCache Recalculate(Genome genome) =>
+        WithExpressionDerivedCache(BodyCalculator.Recalculate(genome, _regions), genome);
+
+    private void RefreshExpressionDerivedCache(Genome genome)
+        => Cache = WithExpressionDerivedCache(Cache, genome);
+
+    private BodyCache WithExpressionDerivedCache(BodyCache cache, Genome genome)
+    {
+        double maintenance = 0.0;
+        double photosyntheticSurface = 0.0;
+        double feedingSurface = 0.0;
+        double digestiveCapacity = 0.0;
+        double decomposerSurface = 0.0;
+        for (int index = 0; index < _regions.Count; index++)
+        {
+            BodyRegion region = _regions[index];
+            RegionGene gene = genome.GetRegion(region.RegionId);
+            maintenance += region.Matter / 30.0 *
+                (0.10 + (0.08 * gene.Rigidity) + (0.08 * gene.Contractility) +
+                 (0.05 * gene.SignalConductivity) + (0.04 * gene.CatalyticActivity) +
+                 (0.055 * region.PhotosyntheticExpression) +
+                 (0.040 * region.FeedingExpression) +
+                 (0.050 * region.DigestiveExpression) +
+                 (0.045 * region.DecomposerExpression));
+            digestiveCapacity += region.Matter * region.DigestiveExpression *
+                (0.25 + (0.75 * gene.CatalyticActivity)) *
+                (0.25 + (0.75 * region.TransportAvailability));
+        }
+        for (int index = 0; index < FunctionalGeometry.Count; index++)
+        {
+            BodyFunctionalGeometry geometry = FunctionalGeometry[index];
+            int regionIndex = IndexOfRegion(geometry.RegionId);
+            if (regionIndex < 0) continue;
+            BodyRegion region = _regions[regionIndex];
+            RegionGene gene = genome.GetRegion(region.RegionId);
+            double transport = (0.25 + (0.75 * region.TransportAvailability)) *
+                geometry.MatterTransportEfficiency;
+            double material = 0.25 + (0.75 * gene.Permeability);
+            photosyntheticSurface += geometry.ExposedSurface * region.PhotosyntheticExpression;
+            feedingSurface += geometry.ExposedSurface *
+                Math.Sqrt(region.FeedingExpression * region.DigestiveExpression) * transport * material;
+            decomposerSurface += geometry.ExposedSurface *
+                Math.Sqrt(region.DecomposerExpression * region.DigestiveExpression) * transport * material;
+        }
+        return cache with
+        {
+            PhotosyntheticSurface = photosyntheticSurface,
+            FeedingSurface = feedingSurface,
+            DigestiveCapacity = digestiveCapacity,
+            DecomposerSurface = decomposerSurface,
+            MaintenanceEnergyPerSecond = maintenance
+        };
+    }
 
     public double DevelopmentCompletion(Genome genome)
     {
@@ -646,7 +747,9 @@ public static class BodyCalculator
             gene.SignalConductivity + gene.StorageFraction + gene.Pigment +
             gene.ExchangeExpression + gene.BarrierExpression + gene.ContractileExpression +
             gene.StructuralExpression + gene.SensoryExpression + gene.CavityFraction +
-            gene.CavityAperture + Math.Abs(gene.JointRestPitch) + gene.JointMobility;
+            gene.CavityAperture + Math.Abs(gene.JointRestPitch) + gene.JointMobility +
+            gene.PhotosyntheticExpression + gene.FeedingExpression + gene.DigestiveExpression +
+            gene.DecomposerExpression;
         return 0.12 +
             (gene.TargetLength * gene.TargetWidth) *
             (0.35 + (0.65 * gene.Density)) *
@@ -749,9 +852,13 @@ public static class BodyCalculator
             uptake += surface * gene.Permeability * (0.5 + (0.5 * gene.CatalyticActivity)) * matterPath;
             catalysis += surface * gene.CatalyticActivity * gene.Permeability;
             storage += sample.Body.Matter * gene.StorageFraction * 1.5 * matterPath;
-            maintenance += sample.Body.Matter *
+            maintenance += sample.Body.Matter / 30.0 *
                 (0.10 + (0.08 * gene.Rigidity) + (0.08 * gene.Contractility) +
-                 (0.05 * gene.SignalConductivity) + (0.04 * gene.CatalyticActivity));
+                 (0.05 * gene.SignalConductivity) + (0.04 * gene.CatalyticActivity) +
+                 (0.055 * sample.Body.PhotosyntheticExpression) +
+                 (0.040 * sample.Body.FeedingExpression) +
+                 (0.050 * sample.Body.DigestiveExpression) +
+                 (0.045 * sample.Body.DecomposerExpression));
             activation += sample.Body.Matter *
                 ((0.55 * gene.Contractility) + (0.20 * gene.SignalConductivity) +
                  (0.18 * gene.CatalyticActivity)) * signalPath;
@@ -935,6 +1042,10 @@ public static class BodyCalculator
             Math.Abs(left.BoundingRadius - right.BoundingRadius),
             Math.Abs(left.MatterConnectivity - right.MatterConnectivity),
             Math.Abs(left.SignalConnectivity - right.SignalConnectivity)
+            ,Math.Abs(left.PhotosyntheticSurface - right.PhotosyntheticSurface)
+            ,Math.Abs(left.FeedingSurface - right.FeedingSurface)
+            ,Math.Abs(left.DigestiveCapacity - right.DigestiveCapacity)
+            ,Math.Abs(left.DecomposerSurface - right.DecomposerSurface)
         ];
         return differences.Max();
     }

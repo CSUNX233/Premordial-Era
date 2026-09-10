@@ -60,7 +60,15 @@ public readonly record struct ForagingObservation(
     double CenterDanger,
     double AheadDanger,
     double LeftDanger,
-    double RightDanger);
+    double RightDanger)
+{
+    /// <summary>Paid, expressed and motor-connected chemical access in [0,1].</summary>
+    public double ChemicalAccess { get; init; }
+    /// <summary>Paid directional-light evidence in body-forward coordinates.</summary>
+    public double VisualForwardSignal { get; init; }
+    /// <summary>Paid directional-light evidence; positive is body-right.</summary>
+    public double VisualLateralSignal { get; init; }
+}
 
 public readonly record struct ForagingDecision(
     double ResourceGradient,
@@ -252,19 +260,23 @@ public static class BehaviorController
     public static ForagingDecision UpdateForaging(ForagingMemory memory,ForagingObservation observation,
         double energyFraction,double signalConductivity,SimulationConfig config,double deltaSeconds)
     {
+        double chemicalAccess=Math.Clamp(observation.ChemicalAccess,0.0,1.0);
         if(!memory.Initialized)
-            memory.Initialize(observation.Position,observation.CenterCue,
+            memory.Initialize(observation.Position,observation.CenterCue*chemicalAccess,
                 (observation.Position.X*0.754877666)+(observation.Position.Y*0.569840296));
-        memory.UpdateCue(observation.CenterCue,deltaSeconds,config.ForagingCueMemorySeconds);
+        double chemicalResponse=Math.Sqrt(chemicalAccess);
+        memory.UpdateCue(observation.CenterCue*chemicalAccess,deltaSeconds,config.ForagingCueMemorySeconds);
         memory.AdvanceExploration(deltaSeconds,0.55+(0.65*signalConductivity));
         double novelty=memory.Novelty(observation.Position,config.ExplorationMemoryRadius);
         double aheadNovelty=memory.Novelty(observation.AheadPosition,config.ExplorationMemoryRadius);
         double leftNovelty=memory.Novelty(observation.LeftPosition,config.ExplorationMemoryRadius);
         double rightNovelty=memory.Novelty(observation.RightPosition,config.ExplorationMemoryRadius);
-        double forward=(observation.AheadCue-observation.CenterCue)+
+        double forward=((observation.AheadCue-observation.CenterCue)*chemicalResponse)+
+            (0.45*Math.Clamp(observation.VisualForwardSignal,-1.0,1.0))+
             config.CuriosityStrength*(aheadNovelty-novelty)-
             (observation.AheadDanger-observation.CenterDanger);
-        double lateral=(observation.RightCue-observation.LeftCue)+
+        double lateral=((observation.RightCue-observation.LeftCue)*chemicalResponse)+
+            (1.50*Math.Clamp(observation.VisualLateralSignal,-1.0,1.0))+
             config.CuriosityStrength*(rightNovelty-leftNovelty)+
             (observation.LeftDanger-observation.RightDanger);
         Vector2 forwardDirection=observation.AheadPosition-observation.Position;

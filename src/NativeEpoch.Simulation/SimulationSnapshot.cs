@@ -42,7 +42,15 @@ public readonly record struct SimulationSnapshot(
     double CumulativeWaterLoss,
     double MaximumCacheError,
     bool AllFinite,
-    ulong StateFingerprint);
+    ulong StateFingerprint)
+{
+    public double EnvironmentVegetation { get; init; }
+    public double EnvironmentEdibleOrganics { get; init; }
+    public double CumulativePrimaryProduction { get; init; }
+    public double CumulativeOrganicFeeding { get; init; }
+    public double CumulativeDecomposition { get; init; }
+    public double CumulativePredationOrganic { get; init; }
+}
 
 public readonly record struct EnvironmentInterventionRecord(
     long StepIndex,

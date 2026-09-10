@@ -73,10 +73,14 @@ public static class MovementBehaviorDiagnostics
 
     private static MovementTrack TrackLowEnergy()
     {
+        SimulationConfig defaults = new();
         SimulationConfig config = new()
         {
             ReproductionEnergyThreshold = 100.0,
-            AncestorEnergy = 0.05,
+            // Isolate the rest response below the configured reserve threshold.
+            // A fueled animal is now allowed to restart respiration and explore.
+            AncestorEnergy = defaults.MaximumEnergy * defaults.ForagingRestEnergyFraction * 0.1,
+            MetabolicSubstratePerSecond = 1e-9,
             LightEnergyPerSurfacePerSecond = 0.0001,
             SurfaceLightEnergyPerWorldAreaPerSecond = 0.0001
         };

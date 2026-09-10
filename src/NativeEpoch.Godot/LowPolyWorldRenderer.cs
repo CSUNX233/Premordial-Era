@@ -26,6 +26,7 @@ public sealed partial class LowPolyWorldRenderer : Node3D
     private const float OrganismVisualScale = 1.0f;
     private readonly List<MeshInstance3D> _terrainChunks = [];
     private Node3D _terrainRoot = null!;
+    private ResourceFieldRenderer _resourceRenderer = null!;
     private MeshInstance3D _water = null!;
     private MultiMeshInstance3D _organisms = null!;
     private MeshInstance3D _selection = null!;
@@ -49,6 +50,8 @@ public sealed partial class LowPolyWorldRenderer : Node3D
     {
         _terrainRoot = new Node3D { Name = "TerrainChunks" };
         AddChild(_terrainRoot);
+        _resourceRenderer = new ResourceFieldRenderer { Name = "ResourceFields" };
+        AddChild(_resourceRenderer);
 
         StandardMaterial3D organismMaterial = new()
         {
@@ -112,7 +115,8 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         StandardMaterial3D terrainMaterial = new()
         {
             VertexColorUseAsAlbedo = true,
-            Roughness = 0.92f
+            Roughness = 0.92f,
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded
         };
         EnsureTerrainChunks();
         float spacing = worldSize / TerrainSegments;
@@ -146,11 +150,12 @@ public sealed partial class LowPolyWorldRenderer : Node3D
 
         StandardMaterial3D waterMaterial = new()
         {
-            AlbedoColor = new Color(0.055f, 0.31f, 0.49f, 0.37f),
+            AlbedoColor = new Color(0.008f, 0.055f, 0.11f, 0.52f),
             Roughness = 0.18f,
             Metallic = 0.05f,
             Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-            CullMode = BaseMaterial3D.CullModeEnum.Disabled
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded
         };
         _water ??= new MeshInstance3D();
         if (_water.GetParent() is null)
@@ -162,6 +167,16 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         };
         _water.Position = Vector3.Zero;
     }
+
+    public ResourceRenderCounts UpdateResources(EnvironmentResourceSnapshot snapshot,
+        System.Numerics.Vector2? viewCenter = null, bool visible = true)
+    {
+        _resourceRenderer.Visible = visible;
+        return visible ? _resourceRenderer.UpdateResources(snapshot, viewCenter) :
+            _resourceRenderer.LastCounts;
+    }
+
+    public ResourceRenderCounts ResourceCounts => _resourceRenderer.LastCounts;
 
     public int UpdateOrganisms(WorldPresentationSnapshot snapshot, ulong? selectedId,
         System.Numerics.Vector2? viewCenter = null)
@@ -605,12 +620,12 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         if (sample.TerrainHeight < 0.0)
         {
             float depth = Normalize(-sample.TerrainHeight, 0.0, 100.0);
-            return new Color(0.045f + (0.05f * (1f - depth)),
-                0.11f + (0.22f * (1f - depth)), 0.18f + (0.29f * (1f - depth)));
+            return new Color(0.008f + (0.018f * (1f - depth)),
+                0.022f + (0.060f * (1f - depth)), 0.045f + (0.105f * (1f - depth)));
         }
 
         float height = Normalize(sample.TerrainHeight, 0.0, 8.0);
-        return new Color(0.22f + (0.22f * height), 0.39f + (0.20f * height), 0.19f + (0.11f * height));
+        return new Color(0.035f + (0.055f * height), 0.085f + (0.075f * height), 0.022f + (0.035f * height));
     }
 
     private static Color HeatColor(float value)

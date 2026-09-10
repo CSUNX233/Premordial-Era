@@ -216,7 +216,9 @@ public static class MutationDistributionDiagnostics
         g.CatalyticActivity, g.Contractility, g.SignalConductivity,
         g.StorageFraction, g.Pigment, g.ExchangeExpression, g.BarrierExpression,
         g.ContractileExpression, g.StructuralExpression, g.SensoryExpression,
-        g.CavityFraction, g.CavityAperture, g.JointRestPitch, g.JointMobility
+        g.CavityFraction, g.CavityAperture, g.JointRestPitch, g.JointMobility,
+        g.PhotosyntheticExpression, g.FeedingExpression, g.DigestiveExpression,
+        g.DecomposerExpression
     ];
 
     private static double[] ControllerScalars(ControllerNodeGene g) =>

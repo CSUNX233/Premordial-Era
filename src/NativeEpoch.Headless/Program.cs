@@ -9,6 +9,10 @@ internal static class HeadlessProgram
     {
         try
         {
+            bool diagnoseFoodWeb = args.Contains("--diagnose-food-web");
+            bool diagnoseLandResources = args.Contains("--diagnose-land-resources");
+            bool diagnoseSensingBehavior = args.Contains("--diagnose-sensing-behavior");
+            bool diagnosePhotosynthesis = args.Contains("--diagnose-photosynthesis");
             bool diagnoseEcology = args.Contains("--diagnose-ecology");
             bool diagnoseMovement = args.Contains("--diagnose-movement");
             bool diagnoseCompetition = args.Contains("--diagnose-competition");
@@ -20,13 +24,44 @@ internal static class HeadlessProgram
             bool diagnosePrecision = args.Contains("--diagnose-precision");
             bool diagnoseWorldPrecision = args.Contains("--diagnose-world-precision");
             bool diagnoseDistribution = args.Contains("--diagnose-mutation-distribution");
-            Options options = Options.Parse(args.Where(a => a != "--diagnose-ecology" && a != "--diagnose-movement" && a != "--diagnose-competition" && a != "--diagnose-tissue" && a != "--diagnose-vision" && a != "--diagnose-appendage" && a != "--diagnose-cavity" && a != "--diagnose-founders" && a != "--diagnose-precision" && a != "--diagnose-world-precision" && a != "--diagnose-mutation-distribution").ToArray());
+            Options options = Options.Parse(args.Where(a => a != "--diagnose-food-web" && a != "--diagnose-land-resources" && a != "--diagnose-sensing-behavior" && a != "--diagnose-photosynthesis" && a != "--diagnose-ecology" && a != "--diagnose-movement" && a != "--diagnose-competition" && a != "--diagnose-tissue" && a != "--diagnose-vision" && a != "--diagnose-appendage" && a != "--diagnose-cavity" && a != "--diagnose-founders" && a != "--diagnose-precision" && a != "--diagnose-world-precision" && a != "--diagnose-mutation-distribution").ToArray());
             if (options.ShowHelp)
             {
                 PrintHelp();
                 return 0;
             }
 
+            if (diagnoseFoodWeb)
+            {
+                var environment = FoodWebEnvironmentDiagnostics.Run();
+                var nutrition = FoodWebDiagnostics.Run();
+                var predation = ContactPredationDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { environment, nutrition, predation }));
+                bool passed = environment.Passed && nutrition.Passed && predation.Passed;
+                Console.WriteLine(passed ? "FOOD WEB PASS" : "FOOD WEB FAIL");
+                return passed ? 0 : 1;
+            }
+            if (diagnoseLandResources)
+            {
+                var result = LandResourceDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed ? "LAND RESOURCES PASS" : "LAND RESOURCES FAIL");
+                return result.Passed ? 0 : 1;
+            }
+            if (diagnoseSensingBehavior)
+            {
+                var result = SensoryBehaviorDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed ? "SENSING BEHAVIOR PASS" : "SENSING BEHAVIOR FAIL");
+                return result.Passed ? 0 : 1;
+            }
+            if (diagnosePhotosynthesis)
+            {
+                var result = PhotosynthesisDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed ? "PHOTOSYNTHESIS PASS" : "PHOTOSYNTHESIS FAIL");
+                return result.Passed ? 0 : 1;
+            }
             if (diagnoseEcology)
                 return EcologyDiagnostics.Run(CreateWorld(options), options.Steps, options.ReportEvery);
             if (diagnoseFounders)
@@ -692,6 +727,8 @@ internal static class HeadlessProgram
         $"death(damage/juvenile/senescence)={snapshot.DamageDeaths}/{snapshot.JuvenileDeaths}/{snapshot.SenescenceDeaths} " +
         $"genomes={snapshot.GenomeCount,4} regions={snapshot.TotalBodyRegions,6} maturity={snapshot.AverageMaturity:F3} " +
         $"minerals={snapshot.EnvironmentMinerals,12:F6} detritus={snapshot.EnvironmentDetritus,10:F6} " +
+        $"plants_algae={snapshot.EnvironmentVegetation:F4} organic={snapshot.EnvironmentEdibleOrganics:F4} " +
+        $"production/feed/decompose/predation={snapshot.CumulativePrimaryProduction:F4}/{snapshot.CumulativeOrganicFeeding:F4}/{snapshot.CumulativeDecomposition:F4}/{snapshot.CumulativePredationOrganic:F4} " +
         $"body={snapshot.OrganismBodyMatter,10:F6} stored={snapshot.OrganismStoredMatter,10:F6} " +
         $"energy={snapshot.LivingEnergy,10:F4} " +
         $"speed={snapshot.AverageSpeed:F4} movement_energy={snapshot.CumulativeMovementEnergy:F4} " +
@@ -749,6 +786,10 @@ internal static class HeadlessProgram
         Console.WriteLine("  --diagnose-precision     compare reference and reduced surface integration");
         Console.WriteLine("  --diagnose-world-precision compare complete simulation step cost and outcomes");
         Console.WriteLine("  --diagnose-mutation-distribution check sparse mutation frequencies and dimensions");
+        Console.WriteLine("  --diagnose-land-resources check finite inland/coastal/ocean resources and relocation");
+        Console.WriteLine("  --diagnose-sensing-behavior check paid chemical/visual steering and receptor loss");
+        Console.WriteLine("  --diagnose-photosynthesis check pigment expression, light conversion and costs");
+        Console.WriteLine("  --diagnose-food-web check producers, consumption, decomposition and contact predation");
         Console.WriteLine("  --experiment-adaptation run three bounded natural-lineage paired assays");
         Console.WriteLine("  --experiment-supplement run one fixed finite-resource common-garden supplement");
         Console.WriteLine("  --inspect-lineage <int>  print recent parent-child genome/body differences");

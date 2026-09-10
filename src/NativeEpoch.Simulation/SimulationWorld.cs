@@ -19,6 +19,11 @@ public sealed class SimulationWorld
     private readonly List<EnvironmentBrushCommand> _pendingEnvironmentCommands = [];
     private readonly List<EnvironmentInterventionRecord> _recentInterventions = [];
     private readonly Dictionary<int, BodyGeometry> _visualGeometryTemplates = [];
+    private readonly Dictionary<ulong, double> _mineralDemands = [];
+    private readonly Dictionary<ulong, double> _organicDemands = [];
+    private readonly Dictionary<ulong, double> _detritusDemands = [];
+    private EnvironmentResourceSnapshot? _resourcePresentation;
+    private long _resourcePresentationStep = -100;
     private List<Organism> _organisms;
     private List<Organism> _nextOrganisms;
     private readonly List<Organism> _birthBuffer = [];
@@ -95,6 +100,10 @@ public sealed class SimulationWorld
     public long JuvenileDeaths { get; private set; }
     public long SenescenceDeaths { get; private set; }
     public double CumulativeLightEnergy { get; private set; }
+    public double CumulativePredationOrganic { get; private set; }
+    public double CumulativeOrganicFeeding { get; private set; }
+    public double CumulativeDecomposition { get; private set; }
+    public double CumulativePrimaryProduction { get; private set; }
     public double CumulativeDissipatedEnergy { get; private set; }
     public double CumulativeMovementEnergy { get; private set; }
     public double CumulativeExternalMatter { get; private set; }
@@ -127,6 +136,7 @@ public sealed class SimulationWorld
             _recentInterventions.Add(new(StepIndex, command, matterDelta));
         }
         _pendingEnvironmentCommands.Clear();
+        if (count > 0) _resourcePresentation = null;
         return count;
     }
 
@@ -137,20 +147,38 @@ public sealed class SimulationWorld
         double dt = _config.FixedDeltaSeconds;
         _environment.UpdateOxygen(dt);
         _environment.UpdateMatterCycles(dt);
+        ProducerStepResult producers = _environment.UpdateProducers(dt);
+        CumulativeLightEnergy += producers.LightEnergyConsumed;
+        CumulativeDissipatedEnergy += producers.MatterRespired * BilinearEnvironmentField.FoodWebEnergyPerMatter;
+        CumulativePrimaryProduction += producers.MatterGrown;
         IReadOnlyDictionary<ulong, double> lightAllocations = _environment.AllocateLightEnergy(
             _organisms.Select(organism =>
             {
                 EnvironmentSample sample = _environment.Sample(organism.Position, organism.Depth);
-                double request = sample.Light * organism.Body.Cache.LightCaptureSurface *
+                double request = sample.Light * organism.Body.Cache.PhotosyntheticSurface *
                     _config.LightEnergyPerSurfacePerSecond * dt;
                 return new LightEnergyRequest(organism.Id, organism.Position, organism.Depth, request);
             }), dt);
-        Dictionary<ulong,double> matterDemands=_organisms.ToDictionary(organism=>organism.Id,
-            organism=>RegionalPhysiology.EstimateMatterDemand(organism.Body,
-                Genomes.Get(organism.GenomeId),lightAllocations.GetValueOrDefault(organism.Id),_config,dt));
-        IReadOnlyDictionary<ulong,MatterReservation> matterReservations=_environment.ReserveMatter(
-            _organisms.Select(organism=>new MatterUptakeRequest(organism.Id,organism.Position,
-                matterDemands[organism.Id])));
+        Dictionary<ulong,double> mineralDemands=_mineralDemands;
+        Dictionary<ulong,double> organicDemands=_organicDemands;
+        Dictionary<ulong,double> detritusDemands=_detritusDemands;
+        mineralDemands.Clear();
+        organicDemands.Clear();
+        detritusDemands.Clear();
+        foreach (Organism organism in _organisms)
+        {
+            Genome genome=Genomes.Get(organism.GenomeId);
+            mineralDemands[organism.Id]=RegionalPhysiology.EstimateMineralDemand(
+                organism.Body,genome,lightAllocations.GetValueOrDefault(organism.Id),_config,dt);
+            organicDemands[organism.Id]=RegionalPhysiology.EstimateOrganicDemand(organism.Body,genome,_config,dt);
+            detritusDemands[organism.Id]=RegionalPhysiology.EstimateDetritusDemand(organism.Body,genome,dt);
+        }
+        var mineralReservations=_environment.ReserveMinerals(_organisms.Select(organism=>
+            new MineralUptakeRequest(organism.Id,organism.Position,mineralDemands[organism.Id])));
+        var organicReservations=_environment.ReserveOrganic(_organisms.Select(organism=>
+            new OrganicUptakeRequest(organism.Id,organism.Position,organicDemands[organism.Id])));
+        var detritusReservations=_environment.ReserveDetritus(_organisms.Select(organism=>
+            new DetritusUptakeRequest(organism.Id,organism.Position,detritusDemands[organism.Id])));
         if (CollectPerformanceMetrics)
         {
             PerformanceMetrics.EnvironmentMilliseconds += ElapsedMilliseconds(measuredAt);
@@ -187,12 +215,20 @@ public sealed class SimulationWorld
             RegionalExchangeResult exchange = RegionalPhysiology.ExchangeWithEnvironment(
                 organism.Body, genome, _environment, organism.Position, organism.HeadingRadians,
                 organism.Depth, _config, dt, lightEnergyAllowance:
-                    lightAllocations.GetValueOrDefault(organism.Id),matterReservation:
-                    matterReservations.GetValueOrDefault(organism.Id),matterDemand:
-                    matterDemands.GetValueOrDefault(organism.Id));
-            organism.ResourceDemandLastStep=exchange.SubstrateDemand;
-            organism.ResourceSatisfaction=exchange.SubstrateDemand>1e-12
-                ?Math.Clamp(exchange.SubstrateUptake/exchange.SubstrateDemand,0.0,1.0):1.0;
+                    lightAllocations.GetValueOrDefault(organism.Id),
+                matterDemand: mineralDemands[organism.Id]+organicDemands[organism.Id]+detritusDemands[organism.Id],
+                mineralReservation: mineralReservations.GetValueOrDefault(organism.Id),
+                organicReservation: organicReservations.GetValueOrDefault(organism.Id),
+                detritusReservation: detritusReservations.GetValueOrDefault(organism.Id));
+            organism.ResourceDemandLastStep=exchange.FoodDemand;
+            organism.PrimaryProductionLastStep=exchange.PhotosynthesizedSubstrate;
+            organism.OrganicFeedingLastStep=exchange.OrganicAssimilated;
+            organism.DecompositionLastStep=exchange.DetritusDecomposed;
+            CumulativePrimaryProduction+=exchange.PhotosynthesizedSubstrate;
+            CumulativeOrganicFeeding+=exchange.OrganicAssimilated;
+            CumulativeDecomposition+=exchange.DetritusDecomposed;
+            organism.ResourceSatisfaction=exchange.FoodDemand>1e-12
+                ?Math.Clamp(exchange.FoodConsumed/exchange.FoodDemand,0.0,1.0):1.0;
             if (CollectPerformanceMetrics)
             {
                 PerformanceMetrics.ExchangeMilliseconds += ElapsedMilliseconds(measuredAt);
@@ -207,7 +243,9 @@ public sealed class SimulationWorld
             CumulativeOxygenUptake += exchange.OxygenUptake;
             CumulativeWaterUptake += exchange.WaterUptake;
             CumulativeWaterLoss += exchange.WaterLost;
-            CumulativeLightEnergy += exchange.LightEnergy;
+            CumulativeLightEnergy += exchange.AbsorbedLight;
+            CumulativeDissipatedEnergy += exchange.PhotosyntheticHeat + exchange.PhotosyntheticMaintenance;
+            organism.LightEnergyLastStep = exchange.LightEnergy;
             CumulativeDissipatedEnergy += exchange.AssimilationEnergySpent;
 
             RegionalPhysiology.TransportAlongMatterEdges(organism.Body, genome, _config, dt);
@@ -223,7 +261,7 @@ public sealed class SimulationWorld
             organism.ChemicalSenseAccess=sensing.ChemicalAccess;
             organism.SensingEnergyLastStep=sensing.EnergySpent;
             CumulativeDissipatedEnergy+=sensing.EnergySpent;
-            ForagingObservation foragingObservation=SenseForaging(organism,genome,sensing.ChemicalAccess);
+            ForagingObservation foragingObservation=SenseForaging(organism,genome,sensing);
             double energyFraction=Math.Clamp(organism.Body.TotalEnergy/_config.MaximumEnergy,0,1);
             double meanConductivity=genome.Regions.Average(region=>region.SignalConductivity);
             ForagingDecision foraging=BehaviorController.UpdateForaging(organism.ForagingMemory,
@@ -240,9 +278,9 @@ public sealed class SimulationWorld
                 Math.Clamp(organism.Body.TotalSubstrate / Math.Max(0.1, organism.Body.Cache.TotalMatter), 0, 1),
                 organism.Hydration,
                 sensing.ContactSignal,
-                foraging.ResourceGradient*sensing.ChemicalAccess,
-                foraging.ResourceLateral*sensing.ChemicalAccess,
-                foraging.ResourceTrend*sensing.ChemicalAccess,
+                foraging.ResourceGradient,
+                foraging.ResourceLateral,
+                foraging.ResourceTrend,
                 foraging.Novelty,foraging.Danger*sensing.ChemicalAccess,foraging.ExplorationSignal);
             ControllerEvaluation control = BehaviorController.Evaluate(
                 genome, organism.ControllerState, organism.ControllerInputs,
@@ -425,6 +463,11 @@ public sealed class SimulationWorld
             {
                 Generation=o.Generation,ExplorationDrive=o.ExplorationDrive,
                 BirthMutationCount=o.BirthMutationCount,
+                LightEnergyLastStep=o.LightEnergyLastStep,
+                OrganicFeedingLastStep=o.OrganicFeedingLastStep,
+                DecompositionLastStep=o.DecompositionLastStep,
+                PrimaryProductionLastStep=o.PrimaryProductionLastStep,
+                PredationLastStep=o.PredationLastStep,
                 OffspringMutationProbability=_mutationsEnabled?GenomeMutator.NaturalMutationProbability(g.MutationRate):0,
                 ForagingTrend=o.ForagingTrend,ContactNeighborCount=o.ContactNeighborCount,
                 InteractionOpponentId=o.InteractionOpponentId,InteractionState=o.InteractionState,
@@ -432,7 +475,8 @@ public sealed class SimulationWorld
                 ResourceSatisfaction=o.ResourceSatisfaction,ResourceDemandLastStep=o.ResourceDemandLastStep,
                 MeanTissueExpression=o.Body.Regions.Count>0?o.Body.Regions.Average(region=>(
                     region.ExchangeExpression+region.BarrierExpression+region.ContractileExpression+
-                    region.StructuralExpression+region.SensoryExpression)/5.0):0.0,
+                    region.StructuralExpression+region.SensoryExpression+region.PhotosyntheticExpression+
+                    region.FeedingExpression+region.DigestiveExpression+region.DecomposerExpression)/9.0):0.0,
                 ActiveSensorCount=o.ActiveSensorCount,ChemicalSensorSignal=o.ChemicalSensorSignal,
                 ContactSensorSignal=o.ContactSensorSignal,SensingEnergyLastStep=o.SensingEnergyLastStep,
                 ActiveVisualSensorCount=o.ActiveVisualSensorCount,VisionSignal=o.VisionSignal,
@@ -446,7 +490,12 @@ public sealed class SimulationWorld
                 CavityEnergyLastStep=o.CavityEnergyLastStep
             };
         }
-        return new(CaptureSnapshot(fullValidation: false), result);
+        if (_resourcePresentation is null || StepIndex - _resourcePresentationStep >= 10)
+        {
+            _resourcePresentation = _environment.CaptureResourceSnapshot();
+            _resourcePresentationStep = StepIndex;
+        }
+        return new(CaptureSnapshot(fullValidation: false), result) { Resources = _resourcePresentation };
     }
 
     private BodyGeometry VisualTemplateGeometry(int genomeId, Genome genome)
@@ -500,7 +549,7 @@ public sealed class SimulationWorld
         double minerals = _environment.TotalMinerals;
         double detritus = _environment.TotalDetritus;
         double waste = _environment.TotalMetabolicWaste;
-        double totalMatter = minerals + detritus + waste + bodyMatter + stored;
+        double totalMatter = _environment.TotalEnvironmentMatter + bodyMatter + stored;
         double matterError = totalMatter - (_initialMatter + CumulativeExternalMatter);
         double environmentOxygen = _environment.TotalOxygen;
         double oxygenError = environmentOxygen + organismOxygen + CumulativeOxygenConsumed -
@@ -519,7 +568,15 @@ public sealed class SimulationWorld
             _initialOxygen, _environment.CumulativeExternalOxygenSupply,
             CumulativeOxygenUptake, CumulativeOxygenConsumed, oxygenError,
             CumulativeWaterUptake, CumulativeWaterLoss, cacheError,
-            finite && cacheValid, fullValidation ? ComputeFingerprint() : 0UL);
+            finite && cacheValid, fullValidation ? ComputeFingerprint() : 0UL)
+        {
+            EnvironmentVegetation = _environment.TotalVegetation,
+            EnvironmentEdibleOrganics = _environment.TotalEdibleOrganics,
+            CumulativePrimaryProduction = CumulativePrimaryProduction,
+            CumulativeOrganicFeeding = CumulativeOrganicFeeding,
+            CumulativeDecomposition = CumulativeDecomposition,
+            CumulativePredationOrganic = CumulativePredationOrganic
+        };
     }
 
     public static bool AreWithinContactRange(
@@ -659,8 +716,9 @@ public sealed class SimulationWorld
     private DeathCause? SampleMortality(Organism organism, Genome genome, double dt)
     {
         double development = organism.Body.DevelopmentCompletion(genome);
-        double energyNeed = Math.Max(0.1,
-            _config.BaseMaintenanceEnergyPerSecond + organism.Body.Cache.MaintenanceEnergyPerSecond);
+        double energyNeed = Math.Max(1e-6,
+            _config.BaseMaintenanceEnergyPerSecond * organism.Body.Cache.TotalMatter +
+            organism.Body.Cache.MaintenanceEnergyPerSecond);
         double energyReserve = Math.Clamp(organism.Body.TotalEnergy / (energyNeed * 5.0), 0.0, 1.0);
         double substrateReserve = Math.Clamp(
             organism.Body.TotalSubstrate / Math.Max(0.12, organism.Body.Cache.TotalMatter * 0.35), 0.0, 1.0);
@@ -691,9 +749,11 @@ public sealed class SimulationWorld
             : DeathCause.Senescence;
     }
 
-    private ForagingObservation SenseForaging(Organism organism,Genome genome,double chemicalAccess)
+    private ForagingObservation SenseForaging(Organism organism,Genome genome,TissueSensingResult sensing)
     {
-        float distance=(float)Math.Max(_config.ForagingSenseDistance,organism.Body.Cache.BoundingRadius*2.5);
+        // Probe geometry also supplies self-motion/novelty memory, even without receptors.
+        float distance=(float)Math.Max(0.1,Math.Min(_config.ForagingSenseDistance,
+            sensing.ChemicalRange>0.0?sensing.ChemicalRange:_config.ForagingSenseDistance));
         Vector2 forward=new((float)Math.Cos(organism.HeadingRadians),(float)Math.Sin(organism.HeadingRadians));
         Vector2 right=new(-forward.Y,forward.X);
         Vector2 Clamp(Vector2 value)=>Vector2.Clamp(value,Vector2.Zero,new Vector2(_config.WorldSize));
@@ -702,38 +762,40 @@ public sealed class SimulationWorld
         Vector2 left=Clamp(center-right*distance);
         Vector2 rightPosition=Clamp(center+right*distance);
         EnvironmentSample centerSample=_environment.Sample(center,organism.Depth);
-        if(chemicalAccess<=0.01)
+        double growthRemaining=Math.Max(0.0,genome.Regions.Sum(BodyCalculator.TargetMatter)-organism.Body.Cache.TotalMatter);
+        double substrateTarget=Math.Max(organism.Body.Cache.TotalMatter*0.35,
+            _config.CoreInitialMatter+_config.NewbornSubstrate+growthRemaining);
+        double reserve=Math.Clamp(organism.Body.TotalSubstrate/Math.Max(0.10,substrateTarget),0,1);
+        double area=Math.Max(0.01,organism.Body.Cache.ExposedSurface);
+        double production=organism.Body.Cache.PhotosyntheticSurface/area;
+        double feeding=RegionalPhysiology.FeedingCapacity(organism.Body,genome)/area;
+        double decomposition=RegionalPhysiology.DecompositionCapacity(organism.Body,genome)/area;
+        double Cue(EnvironmentSample sample)
         {
-            double cue=ResourceCue(centerSample,organism,genome);
-            double danger=EnvironmentalDanger(centerSample,organism,genome);
-            return new(center,center,center,center,cue,cue,cue,cue,danger,danger,danger,danger);
+            double available=Math.Max(0.0,sample.Minerals*production+
+                (sample.ProducerBiomass+sample.EdibleOrganics)*feeding+sample.Detritus*decomposition);
+            return (available/(0.12+available))*(0.35+0.65*(1.0-reserve));
         }
-        EnvironmentSample aheadSample=_environment.Sample(ahead,organism.Depth);
-        EnvironmentSample leftSample=_environment.Sample(left,organism.Depth);
-        EnvironmentSample rightSample=_environment.Sample(rightPosition,organism.Depth);
-        return new(center,ahead,left,rightPosition,
-            ResourceCue(centerSample,organism,genome),ResourceCue(aheadSample,organism,genome),
-            ResourceCue(leftSample,organism,genome),ResourceCue(rightSample,organism,genome),
-            EnvironmentalDanger(centerSample,organism,genome),EnvironmentalDanger(aheadSample,organism,genome),
-            EnvironmentalDanger(leftSample,organism,genome),EnvironmentalDanger(rightSample,organism,genome));
-    }
-
-    private double ResourceCue(EnvironmentSample sample,Organism organism,Genome genome)
-    {
-        double energyFraction=Math.Clamp(organism.Body.TotalEnergy/_config.MaximumEnergy,0,1);
-        double growthRemaining = Math.Max(0.0, genome.Regions.Sum(BodyCalculator.TargetMatter) - organism.Body.Cache.TotalMatter);
-        double substrateTarget = Math.Max(organism.Body.Cache.TotalMatter * 0.35,
-            _config.CoreInitialMatter + _config.NewbornSubstrate + growthRemaining);
-        double substrateFraction=Math.Clamp(organism.Body.TotalSubstrate/
-            Math.Max(0.10,substrateTarget),0,1);
-        double lightAffinity=0.10+genome.Regions.Average(region=>region.LightReactivity);
-        double matterAffinity=0.10+genome.Regions.Average(region=>region.Permeability);
-        double availableMatter=sample.Minerals+sample.Detritus;
-        double matterSignal=availableMatter/(0.12+availableMatter);
-        double oxygen=sample.WaterDepth>0?sample.DissolvedOxygenAvailability:sample.AirOxygenAvailability;
-        double lightValue=sample.Light*lightAffinity*(0.30+(0.70*(1.0-energyFraction)));
-        double matterValue=matterSignal*matterAffinity*(0.25+(0.75*(1.0-substrateFraction)));
-        return Math.Clamp((lightValue+matterValue+(0.12*oxygen))/(lightAffinity+matterAffinity+0.12),0,1);
+        double cue=Cue(centerSample);
+        double aheadCue=cue,leftCue=cue,rightCue=cue;
+        if(sensing.ChemicalAccess>1e-6 && sensing.ChemicalRange>0.0)
+        {
+            aheadCue=Cue(_environment.Sample(ahead,organism.Depth));
+            leftCue=Cue(_environment.Sample(left,organism.Depth));
+            rightCue=Cue(_environment.Sample(rightPosition,organism.Depth));
+        }
+        // Drying/pressure discomfort is local. Smell does not reveal remote light,
+        // oxygen or terrain hazards. Directional light arrives through paid receptors.
+        double danger=EnvironmentalDanger(centerSample,organism,genome);
+        double lightBenefit=Math.Clamp(organism.Body.Cache.PhotosyntheticSurface/
+            Math.Max(0.01,organism.Body.Cache.TotalMatter),0.0,1.0);
+        return new(center,ahead,left,rightPosition,cue,aheadCue,leftCue,rightCue,
+            danger,danger,danger,danger)
+        {
+            ChemicalAccess=sensing.ChemicalAccess,
+            VisualForwardSignal=sensing.VisualForwardSignal*lightBenefit,
+            VisualLateralSignal=sensing.VisualLateralSignal*lightBenefit
+        };
     }
 
     private static double EnvironmentalDanger(EnvironmentSample sample,Organism organism,Genome genome)
@@ -942,6 +1004,7 @@ public sealed class SimulationWorld
             }
         }
         CumulativeContactPairs+=pairs.Count;
+        ApplyContactPredation(opponents, dt);
         double[] effort=new double[count],energySpent=new double[count];
         Vector2[] acceleration=new Vector2[count],interactionDirection=new Vector2[count];
         for(int index=0;index<count;index++)
@@ -987,6 +1050,34 @@ public sealed class SimulationWorld
                 state,effort[index],energySpent[index],direction);
         }
         return new(states,occupancy,pairs.Count);
+    }
+
+    private void ApplyContactPredation(int[] opponents, double dt)
+    {
+        for (int index = 0; index < _organisms.Count; index++)
+        {
+            Organism organism = _organisms[index];
+            organism.PredationLastStep = 0;
+            organism.PredationEnergyLastStep = 0;
+            _organisms[index] = organism;
+        }
+        // Reuse the strongest actual contact. Alternating iteration removes a
+        // permanent low-ID first-access advantage without introducing a new RNG.
+        for (int offset = 0; offset < _organisms.Count; offset++)
+        {
+            int index = StepIndex % 2 == 0 ? offset : _organisms.Count - 1 - offset;
+            int target = opponents[index];
+            if (target < 0) continue;
+            Organism predator = _organisms[index], prey = _organisms[target];
+            PredationResult result = ContactPredation.Attempt(
+                predator.Body, Genomes.Get(predator.GenomeId), predator.Position, predator.Depth,
+                prey.Body, Genomes.Get(prey.GenomeId), prey.Position, prey.Depth, _environment, dt);
+            predator.PredationLastStep = result.AssimilatedOrganic;
+            predator.PredationEnergyLastStep = result.EnergySpent;
+            _organisms[index] = predator;
+            CumulativePredationOrganic += result.AssimilatedOrganic;
+            CumulativeDissipatedEnergy += result.EnergySpent;
+        }
     }
 
     private void ResolveOccupancy(ref Organism organism,SpatialOccupancyIndex occupancy)
@@ -1055,8 +1146,8 @@ public sealed class SimulationWorld
         }
     }
 
-    private double CalculateTotalMatter() => _environment.TotalMinerals + _environment.TotalDetritus +
-        _environment.TotalMetabolicWaste + _organisms.Sum(o => o.Body.Cache.TotalMatter + o.Body.TotalSubstrate);
+    private double CalculateTotalMatter() => _environment.TotalEnvironmentMatter +
+        _organisms.Sum(o => o.Body.Cache.TotalMatter + o.Body.TotalSubstrate);
     private double CalculateTotalOxygen() => _environment.TotalOxygen +
         _organisms.Sum(o => o.Body.TotalOxygen+o.CavityState.TotalOxygen);
 
@@ -1074,6 +1165,7 @@ public sealed class SimulationWorld
         FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(_environment.TotalDetritus)));
         FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(_environment.TotalMetabolicWaste)));
         FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(_environment.TotalOxygen)));
+        FingerprintHash.Add(ref hash, _environment.ComputeResourceFingerprint());
         foreach (Organism o in _organisms)
         {
             FingerprintHash.Add(ref hash, o.Id); FingerprintHash.Add(ref hash, o.ParentId);
@@ -1095,7 +1187,9 @@ public sealed class SimulationWorld
                 FingerprintHash.Add(ref hash, unchecked((ulong)r.RegionId));
                 foreach (double value in new[] { r.Matter, r.Substrate, r.Oxygen, r.Water, r.Energy, r.Damage,
                              r.InternalSignal,r.TransportAvailability,r.Activation,r.ExchangeExpression,
-                             r.BarrierExpression,r.ContractileExpression,r.StructuralExpression,r.SensoryExpression })
+                             r.BarrierExpression,r.ContractileExpression,r.StructuralExpression,r.SensoryExpression,
+                             r.PhotosyntheticExpression,r.FeedingExpression,r.DigestiveExpression,
+                             r.DecomposerExpression })
                     FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(value)));
             }
             foreach(double value in o.SensorState)

@@ -30,8 +30,8 @@ public static class SpatialCompetitionDiagnostics
         bool depthSeparates=!index.CanPlace(new Vector2(10,10),2,shape)&&
             index.CanPlace(new Vector2(10,10),2+shape.VerticalHalfExtent*2.1f,shape);
 
-        ContactTrial active=RunContactTrial(14.0);
-        ContactTrial resting=RunContactTrial(0.05);
+        ContactTrial active=RunContactTrial(new SimulationConfig().AncestorEnergy);
+        ContactTrial resting=RunContactTrial(1e-6);
         AllocationTrial allocation=RunAllocationTrial();
         BirthTrial births=RunBirthTrial();
         bool passed=largeRadius>smallRadius*1.15&&active.ResolvedDistance>=0.97&&
@@ -53,10 +53,18 @@ public static class SpatialCompetitionDiagnostics
 
     private static ContactTrial RunContactTrial(double ancestorEnergy)
     {
-        SimulationConfig config=new(){AncestorEnergy=ancestorEnergy,ReproductionEnergyThreshold=100.0};
+        SimulationConfig config=new()
+        {
+            AncestorEnergy=ancestorEnergy,
+            AncestorStoredMatter=ancestorEnergy>1.0?new SimulationConfig().AncestorStoredMatter:1e-6,
+            MetabolicSubstratePerSecond=ancestorEnergy>1.0?new SimulationConfig().MetabolicSubstratePerSecond:1e-9,
+            ReproductionEnergyThreshold=100.0
+        };
         SimulationWorld world=new(config,90210,2,mutationsEnabled:false);
         for(int step=0;step<(ancestorEnergy>1.0?300:1);step++)world.Step();
-        double radius=world.Organisms.Max(organism=>OccupancyShape.FromBody(organism.Body).HorizontalRadius);
+        // Random founders can have different sizes. Place their actual contact
+        // surfaces together instead of leaving a gap based on the larger radius.
+        double radius=world.Organisms.Sum(organism=>OccupancyShape.FromBody(organism.Body).HorizontalRadius)*0.5;
         float depth=world.Organisms[0].Depth;
         Vector2 center=new(256,256);
         world.RelocateForMediumDiagnostic(world.Organisms[0].Id,center-new Vector2((float)(radius*0.99),0),depth,0.0);
@@ -103,7 +111,7 @@ public static class SpatialCompetitionDiagnostics
         {
             WorldSize=8,EnvironmentGridSize=8,TerrainElevationOffset=-100,
             MaxPopulation=256,MaturityAgeSeconds=1.0,GrowthMatterPerSecond=4.0,
-            ReproductionEnergyThreshold=9.0,ReproductionCooldownSeconds=4.0,
+            ReproductionEnergyThreshold=new SimulationConfig().ReproductionEnergyCost,ReproductionCooldownSeconds=4.0,
             ReproductionBlockedRetrySeconds=0.5,NewbornOffsetRadius=0.1f,
             MaximumAquaticSpawnAttempts=8192,SurfaceLightEnergyPerWorldAreaPerSecond=2
         };

@@ -31,6 +31,7 @@ public sealed partial class Stage3Main : Node3D
     private double _timeScale = 1.0;
     private double _stepAccumulator;
     private double _renderAccumulator;
+    private double _resourceRenderAccumulator = 1.0;
     private double _poseInterpolationElapsed;
     private double _statisticsAccumulator;
     private double _inspectorAccumulator;
@@ -103,6 +104,8 @@ public sealed partial class Stage3Main : Node3D
             CaptureSelectedWorldFrame();
         else if (OS.GetCmdlineUserArgs().Contains("--capture-function-catalogue"))
             CaptureFunctionCatalogue();
+        else if (OS.GetCmdlineUserArgs().Contains("--capture-food-web"))
+            CaptureFoodWeb();
     }
 
     public override void _Process(double delta)
@@ -127,6 +130,7 @@ public sealed partial class Stage3Main : Node3D
         }
 
         _renderAccumulator += delta;
+        _resourceRenderAccumulator += delta;
         _poseInterpolationElapsed += delta;
         double renderInterval = _timeScale >= 100.0 ? 0.20 : 0.10;
         if (_renderAccumulator >= renderInterval)
@@ -334,7 +338,7 @@ public sealed partial class Stage3Main : Node3D
             WorldSize = 512f,
             EnvironmentGridSize = 128,
             MaxPopulation = 5_000,
-            // Default-seed late samples at 1800/2100/2400 s: 932/929/975.
+            // One finite material budget shared by the default and observation starts.
             InitialMineralScale = 1.0,
             ResourceBudgetReferenceAncestors = 24
         };
@@ -345,11 +349,12 @@ public sealed partial class Stage3Main : Node3D
         _selectedId = null;
         _stepAccumulator = 0.0;
         _heatmapMode = HeatmapMode.Natural;
+        _resourceRenderAccumulator = 1;
         _worldRenderer.BuildEnvironment(_world.Environment, config.WorldSize, _heatmapMode);
         RefreshSnapshotAndWorld();
         RefreshStatistics();
         RefreshInspector();
-        _hud.UpdateStatus($"已载入 {label}：祖先拥有随机的基础水生形态和基因，拉近可查看幼体差异。资源承载目标约 1000 只，不同起始数量共用同一物质预算。");
+        _hud.UpdateStatus($"已载入 {label}：绿植与水藻可被摄食，青色显示矿物，琥珀色为有机食物，棕色为残骸。水面薄色块表示该水柱资源；基因决定生物颜色。");
         UpdateModeLabel();
     }
 
@@ -378,6 +383,26 @@ public sealed partial class Stage3Main : Node3D
             bool ground = organism.AppendageContactCount > 0 && organism.AppendageSupport > 1e-5 &&
                 organism.AppendageGroundVelocity.LengthSquared() > 1e-8 && organism.AppendageEnergyLastStep > 1e-10;
             bool cavity = organism.CavityTissueOxygenLastStep > 1e-9;
+            if (organism.PrimaryProductionLastStep > 1e-9)
+                RecordFunction(organism, "primary-production", "光合有机物生产",
+                    $"本步把无机养分转成有机储备 {organism.PrimaryProductionLastStep:E2}。",
+                    "需要光、光合表达和矿物同时可用。观察贫养分或遮光环境中的增长变化。");
+            if (organism.OrganicFeedingLastStep > 1e-9)
+                RecordFunction(organism, "organic-feeding", "有机物摄食",
+                    $"本步从植被、藻类或可食有机物同化 {organism.OrganicFeedingLastStep:E2}。",
+                    "摄食与消化都需要实际表达和处理能量；食物被吃后对应环境库存减少。");
+            if (organism.DecompositionLastStep > 1e-9)
+                RecordFunction(organism, "detritus-decomposition", "残骸分解",
+                    $"本步处理残骸 {organism.DecompositionLastStep:E2}。",
+                    "分解者从有机物获得有限收益，并让部分养分回到无机池。");
+            if (organism.PredationLastStep > 1e-9)
+                RecordFunction(organism, "contact-predation", "接触捕食",
+                    $"本步从接触个体同化有机储备 {organism.PredationLastStep:E2}。",
+                    "需要真实接触、摄食和消化能力；处理耗能，未同化物归还残骸池。");
+            if (organism.LightEnergyLastStep > 1e-9)
+                RecordFunction(organism, "pigment-photosynthesis", "色素光能利用",
+                    $"本步光能转化为化学能 {organism.LightEnergyLastStep:E2}。",
+                    "只有付费表达光合色素的外露区域才能利用光能。光合生产还受矿物供应限制，方向光感本身不产能。");
             if (organism.AppendageContactCount > 0 && organism.AppendageSupport > 1e-5)
                 RecordFunction(organism, "ground-support", "附肢接地支撑",
                     $"植地接触 {organism.AppendageContactCount}，支撑比例 {organism.AppendageSupport:P1}。",
@@ -484,6 +509,8 @@ public sealed partial class Stage3Main : Node3D
         int count = Enum.GetValues<HeatmapMode>().Length;
         _heatmapMode = (HeatmapMode)(((int)_heatmapMode + 1) % count);
         _worldRenderer.BuildEnvironment(_world.Environment, _world.Config.WorldSize, _heatmapMode);
+        _resourceRenderAccumulator = 1;
+        RefreshSnapshotAndWorld();
         _hud.UpdateStatus($"环境图层：{HeatmapName(_heatmapMode)}。");
     }
 
@@ -519,12 +546,27 @@ public sealed partial class Stage3Main : Node3D
             return;
         }
         NumericsVector2? land = null;
-        for (int y = 0; y <= 48 && land is null; y++) for (int x = 0; x <= 48; x++)
+        // This is a one-off diagnostic query, never part of the simulation step.
+        // Prefer interior land, not the first shoreline pixel in scan order.
+        var waterSamples = new List<NumericsVector2>();
+        var landSamples = new List<NumericsVector2>();
+        for (int y = 0; y <= 48; y++) for (int x = 0; x <= 48; x++)
         {
             NumericsVector2 candidate = new(
                 _world.Config.WorldSize * x / 48f, _world.Config.WorldSize * y / 48f);
             if (_world.Environment.Sample(candidate).WaterDepth <= 0.0)
-            { land = candidate; break; }
+                landSamples.Add(candidate);
+            else waterSamples.Add(candidate);
+        }
+        float bestClearance = -1;
+        foreach (NumericsVector2 candidate in landSamples)
+        {
+            float edge = Math.Min(Math.Min(candidate.X, candidate.Y),
+                Math.Min(_world.Config.WorldSize - candidate.X, _world.Config.WorldSize - candidate.Y));
+            float clearance = edge * edge;
+            foreach (NumericsVector2 water in waterSamples)
+                clearance = Math.Min(clearance, NumericsVector2.DistanceSquared(candidate, water));
+            if (clearance > bestClearance) { bestClearance = clearance; land = candidate; }
         }
         if (land is null || !_world.RelocateForMediumDiagnostic(_selectedId.Value, land.Value, 0))
         {
@@ -536,7 +578,7 @@ public sealed partial class Stage3Main : Node3D
         _hud.SetPaused(false);
         RefreshSnapshotAndWorld();
         SelectAndFocus(_selectedId.Value);
-        _hud.UpdateStatus("人工诊断：已把选中个体移至陆地。观察含水、气侧摄氧、失水代价和受限移动；这不是自然上岸演化。");
+        _hud.UpdateStatus($"人工诊断：已移至内陆 ({land.Value.X:F0}, {land.Value.Y:F0})。观察含水、摄氧和移动；资源丰富仍需具备陆地生存能力。");
     }
 
     private void SelectAndFocus(ulong organismId)
@@ -599,6 +641,13 @@ public sealed partial class Stage3Main : Node3D
     {
         if (!CompleteSimulationBatch(wait: false)) return false;
         _snapshot = _world.CapturePresentationSnapshot();
+        if (_snapshot.Resources is not null && _resourceRenderAccumulator >= 0.5)
+        {
+            _worldRenderer.UpdateResources(_snapshot.Resources,
+                new System.Numerics.Vector2(_cameraTarget.X+_world.Config.WorldSize*0.5f,
+                    _cameraTarget.Z+_world.Config.WorldSize*0.5f), _heatmapMode == HeatmapMode.Natural);
+            _resourceRenderAccumulator = 0;
+        }
         _renderedRegions = _worldRenderer.UpdateOrganisms(_snapshot, _selectedId,
             new System.Numerics.Vector2(_cameraTarget.X + _world.Config.WorldSize*0.5f,
                 _cameraTarget.Z + _world.Config.WorldSize*0.5f));
@@ -621,7 +670,9 @@ public sealed partial class Stage3Main : Node3D
             $"步 {stats.StepIndex:N0} · {stats.SimulatedSeconds:F1}s · 存活 {stats.Population:N0} · " +
             $"出生/死亡 {stats.CumulativeBirths:N0}/{stats.CumulativeDeaths:N0} · 存活最高第 {livingGeneration} 代\n" +
             $"死亡 损伤/夭折/衰老 {stats.DamageDeaths:N0}/{stats.JuvenileDeaths:N0}/{stats.SenescenceDeaths:N0} · " +
-            $"生物量 {stats.OrganismBodyMatter:F1} · 环境矿物 {stats.EnvironmentMinerals:F1} · 残骸/废物 {stats.EnvironmentDetritus + stats.EnvironmentMetabolicWaste:F1} · 拥挤 {crowdedPopulation:N0}\n" +
+            $"身体/储备 {stats.OrganismBodyMatter:F1}/{stats.OrganismStoredMatter:F1} · 矿物 {stats.EnvironmentMinerals:F1} · 残骸/废物 {stats.EnvironmentDetritus:F1}/{stats.EnvironmentMetabolicWaste:F1}\n" +
+            $"植物/藻类 {stats.EnvironmentVegetation:F1} · 有机食物 {stats.EnvironmentEdibleOrganics:F1} · 累计生产/摄食/分解 {stats.CumulativePrimaryProduction:F1}/{stats.CumulativeOrganicFeeding:F1}/{stats.CumulativeDecomposition:F1}\n" +
+            $"水中/岸边/陆地 {stats.AquaticPopulation}/{stats.ShorePopulation}/{stats.LandPopulation} · 累计光合输入 {stats.CumulativeLightEnergy:F1} · 拥挤 {crowdedPopulation:N0}\n" +
             $"基因组 {stats.GenomeCount:N0} · 身体区域 {stats.TotalBodyRegions:N0}（渲染实例 {_renderedRegions:N0}" +
             $"{(_worldRenderer.UsesSimplifiedProxies ? "，远景代理" : "，完整区域")}） · " +
             $"均速 {stats.AverageSpeed:F2} · 目标 {_timeScale:0}× / 实际 {_achievedScale:0.0}× · " +
@@ -684,15 +735,17 @@ public sealed partial class Stage3Main : Node3D
             $"互动 {interaction} · 对方 ID {opponent} · 争位强度 {organism.InteractionIntensity:P1}\n" +
             $"本步食物需求满足 {foodSatisfaction}\n" +
             $"身体物质 {organism.Body.TotalMatter:F3} · 质量 {organism.Body.PhysicalMass:F3} · 半径 {organism.Body.BoundingRadius:F3}\n" +
-            $"摄光面 {organism.Body.LightCaptureSurface:F3} · 摄取面 {organism.Body.MatterUptakeSurface:F3} · 维护 {organism.Body.MaintenanceEnergyPerSecond:F3}/s\n" +
+            $"有效光合面 {organism.Body.PhotosyntheticSurface:F3} · 摄取面 {organism.Body.MatterUptakeSurface:F3} · 维护 {organism.Body.MaintenanceEnergyPerSecond:F3}/s\n" +
             $"介质 {(organism.Immersion >= 0.8 ? "水中" : organism.Immersion > 0.05 ? "水线" : "陆地")} · 个体深度 {organism.Depth:F2}/{organism.Environment.WaterDepth:F2} · 浸没 {organism.Immersion:P0}\n" +
             $"含水 {organism.Hydration:P1} · 区域氧 {organism.InternalOxygen:F4}/{organism.OxygenCapacity:F4} · 本步摄氧/耗氧 {organism.OxygenUptakeLastStep:F5}/{organism.OxygenConsumedLastStep:F5}\n" +
-            $"代谢产能 {organism.MetabolicEnergyLastStep:F5} · 失水/压力代价 {organism.DehydrationCostLastStep:F5}\n" +
+            $"本步光合储能/代谢产能 {organism.LightEnergyLastStep:F5}/{organism.MetabolicEnergyLastStep:F5} · 失水/压力代价 {organism.DehydrationCostLastStep:F5}\n" +
+            $"本步生产/摄食/分解/捕食 {organism.PrimaryProductionLastStep:E1}/{organism.OrganicFeedingLastStep:E1}/{organism.DecompositionLastStep:E1}/{organism.PredationLastStep:E1}\n" +
             $"表面样本 外露/遮蔽 {organism.ExposedSurfaceSamples}/{organism.OccludedSurfaceSamples} · 水/气暴露面 {organism.WaterExposedArea:F3}/{organism.AirExposedArea:F3}\n" +
             $"区域库存（最多显示 6 区）：\n{regionalInventory}\n" +
             $"环境：海底 {organism.Environment.TerrainHeight:F2} · 压力 {organism.Environment.Pressure:F3} · 光 {organism.Environment.Light:F3}\n" +
             $"溶解氧可用度 {organism.Environment.DissolvedOxygenAvailability:F3} · 空气氧可用度 {organism.Environment.AirOxygenAvailability:F3}（均为各介质内部无量纲势）\n" +
-            $"温度 {organism.Environment.Temperature:F3} · 矿物 {organism.Environment.Minerals:F3} · 代谢废物 {organism.Environment.MetabolicWaste:F3}\n" +
+            $"温度 {organism.Environment.Temperature:F3} · 矿物 {organism.Environment.Minerals:F3} · 植被/有机物 {organism.Environment.ProducerBiomass:F3}/{organism.Environment.EdibleOrganics:F3}\n" +
+            $"残骸/废物 {organism.Environment.Detritus:F3}/{organism.Environment.MetabolicWaste:F3}\n" +
             $"速度 ({organism.Velocity.X:F2}, {organism.Velocity.Y:F2}) · 局部反力 ({organism.LocalActuationForce.X:F3}, {organism.LocalActuationForce.Y:F3}) · 力矩 {organism.ActuationTorque:F3}\n" +
             $"控制输出 收缩 {organism.ControllerOutputs.ContractionActivation:F2} / 通透 {organism.ControllerOutputs.PermeabilityGate:F2} / 分泌 {organism.ControllerOutputs.SecretionActivation:F2}\n" +
             "身体形变与活性表面驱动均消耗局部能量；低能量时减少探索。");
@@ -1049,6 +1102,41 @@ public sealed partial class Stage3Main : Node3D
         Error error = GetViewport().GetTexture().GetImage().SavePng(path);
         GD.Print($"CAPTURE_FUNCTION_CATALOGUE {error} entries={_catalogue.Entries.Count} path={path}");
         GetTree().Quit(error == Error.Ok && _catalogue.Entries.Count > 0 ? 0 : 1);
+    }
+
+    private async void CaptureFoodWeb()
+    {
+        CompleteSimulationBatch(wait: true);
+        _paused = true;
+        _hud.SetPaused(true);
+        _world.Run(100);
+        _cameraTarget = Vector3.Zero;
+        _cameraDistance = 240f;
+        UpdateCameraTransform();
+        _resourceRenderAccumulator = 1;
+        RefreshSnapshotAndWorld();
+        RefreshStatistics();
+        for (int frame = 0; frame < 8; frame++)
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        string directory = ProjectSettings.GlobalizePath("res://artifacts");
+        DirAccess.MakeDirRecursiveAbsolute(directory);
+        Error saved = GetViewport().GetTexture().GetImage().SavePng(
+            System.IO.Path.Combine(directory, "food-web-map.png"));
+        EnvironmentResourceSnapshot resources = _snapshot.Resources!;
+        ResourceRenderCounts populated = _worldRenderer.ResourceCounts;
+        int cells = resources.Minerals.Length;
+        EnvironmentResourceSnapshot empty = resources with
+        {
+            Minerals = new double[cells], LandPlants = new double[cells], Algae = new double[cells],
+            EdibleOrganics = new double[cells], Detritus = new double[cells], MetabolicWaste = new double[cells]
+        };
+        ResourceRenderCounts exhausted = _worldRenderer.UpdateResources(empty);
+        _worldRenderer.UpdateResources(resources);
+        int geneticColors = _snapshot.Organisms.Select(o => o.Geometry.Regions[0].Color).Distinct().Count();
+        bool passed = saved == Error.Ok && populated.Minerals > 0 && populated.LandPlants > 0 &&
+            populated.Algae > 0 && exhausted.Total == 0 && geneticColors > 1;
+        GD.Print($"FOOD_WEB_RENDER {(passed ? "PASS" : "FAIL")} resources={populated} exhausted={exhausted.Total} genetic_colors={geneticColors}");
+        GetTree().Quit(passed ? 0 : 1);
     }
 
     private async void CaptureSelectedWorldFrame()
