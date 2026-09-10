@@ -107,7 +107,7 @@ public static class MovementBehaviorDiagnostics
                 if (world.Organisms[candidate].Id == organismId) { index = candidate; break; }
             if (index < 0) break;
             Organism current = world.Organisms[index];
-            path += Vector2.Distance(previous, current.Position);
+            path += SphericalWorld.Distance(previous, current.Position, config.WorldSize);
             previous = current.Position;
             minX = Math.Min(minX, previous.X); maxX = Math.Max(maxX, previous.X);
             minY = Math.Min(minY, previous.Y); maxY = Math.Max(maxY, previous.Y);
@@ -115,7 +115,7 @@ public static class MovementBehaviorDiagnostics
             activity += current.ExplorationDrive;
             samples++;
         }
-        double net = Vector2.Distance(start, previous);
+        double net = SphericalWorld.Distance(start, previous, config.WorldSize);
         double diameter = Math.Max(0.1, startOrganism.Body.Cache.BoundingRadius * 2.0);
         return new(net, path, net / diameter, cells.Count,
             new Vector2(maxX - minX, maxY - minY), samples > 0 ? activity / samples : 0.0, samples);

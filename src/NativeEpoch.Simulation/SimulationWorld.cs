@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 
 namespace NativeEpoch.Simulation;
 
@@ -69,7 +69,7 @@ public sealed class SimulationWorld
                 ControllerState = new double[ancestorGenome.ControllerNodes.Count],
                 SensorState = new double[ancestorGenome.Sensors.Count],
                 TissueControllerInputs = new double[ancestorGenome.ControllerNodes.Count],
-                ForagingMemory = new ForagingMemory(), Body = body,
+                ForagingMemory = new ForagingMemory(), SocialMemory = new SocialMemory(), Body = body,
                 Pose = new BodyPose(ancestorGenome, body), Generation = 0,
                 AppendageMechanics=new AppendageMechanics(),AppendageRegions=[],
                 CavityState=new CavitySystemState(),
@@ -176,7 +176,9 @@ public sealed class SimulationWorld
         var mineralReservations=_environment.ReserveMinerals(_organisms.Select(organism=>
             new MineralUptakeRequest(organism.Id,organism.Position,mineralDemands[organism.Id])));
         var organicReservations=_environment.ReserveOrganic(_organisms.Select(organism=>
-            new OrganicUptakeRequest(organism.Id,organism.Position,organicDemands[organism.Id])));
+            new OrganicUptakeRequest(organism.Id,organism.Position,organicDemands[organism.Id],
+                1.0-0.75*Genomes.Get(organism.GenomeId).Metabolism.AnimalFoodAffinity,
+                Genomes.Get(organism.GenomeId).Metabolism.AnimalFoodAffinity)));
         var detritusReservations=_environment.ReserveDetritus(_organisms.Select(organism=>
             new DetritusUptakeRequest(organism.Id,organism.Position,detritusDemands[organism.Id])));
         if (CollectPerformanceMetrics)
@@ -261,6 +263,7 @@ public sealed class SimulationWorld
             organism.ChemicalSenseAccess=sensing.ChemicalAccess;
             organism.SensingEnergyLastStep=sensing.EnergySpent;
             CumulativeDissipatedEnergy+=sensing.EnergySpent;
+            SocialMotorResponse social=UpdateSocial(ref organism,genome,occupancy,dt);
             ForagingObservation foragingObservation=SenseForaging(organism,genome,sensing);
             double energyFraction=Math.Clamp(organism.Body.TotalEnergy/_config.MaximumEnergy,0,1);
             double meanConductivity=genome.Regions.Average(region=>region.SignalConductivity);
@@ -289,7 +292,7 @@ public sealed class SimulationWorld
             double controllerPaid = organism.Body.ConsumeEnergy(controllerCost);
             organism.ControllerState = control.State;
             organism.ControllerOutputs = controllerPaid + 1e-12 >= controllerCost
-                ? ApplyForagingDrive(control.Outputs,foraging) : ControllerOutputs.Basal;
+                ? ApplySocialDrive(ApplyForagingDrive(control.Outputs,foraging),social) : ControllerOutputs.Basal;
             CumulativeDissipatedEnergy += controllerPaid;
             organism.Body.UpdateFunctionalState(genome, organism.ControllerOutputs,
                 controllerEnvironment.Light, controllerEnvironment.Pressure, foraging, dt);
@@ -468,6 +471,9 @@ public sealed class SimulationWorld
                 DecompositionLastStep=o.DecompositionLastStep,
                 PrimaryProductionLastStep=o.PrimaryProductionLastStep,
                 PredationLastStep=o.PredationLastStep,
+                AttackDamageLastStep=o.AttackDamageLastStep,RetaliationDamageLastStep=o.RetaliationDamageLastStep,
+                AttackAffinity=Genomes.Get(o.GenomeId).Metabolism.AttackAffinity,
+                RetaliationAffinity=Genomes.Get(o.GenomeId).Metabolism.RetaliationAffinity,
                 OffspringMutationProbability=_mutationsEnabled?GenomeMutator.NaturalMutationProbability(g.MutationRate):0,
                 ForagingTrend=o.ForagingTrend,ContactNeighborCount=o.ContactNeighborCount,
                 InteractionOpponentId=o.InteractionOpponentId,InteractionState=o.InteractionState,
@@ -480,6 +486,9 @@ public sealed class SimulationWorld
                 ActiveSensorCount=o.ActiveSensorCount,ChemicalSensorSignal=o.ChemicalSensorSignal,
                 ContactSensorSignal=o.ContactSensorSignal,SensingEnergyLastStep=o.SensingEnergyLastStep,
                 ActiveVisualSensorCount=o.ActiveVisualSensorCount,VisionSignal=o.VisionSignal,
+                SocialResponse=o.SocialResponse,SocialTargetId=o.SocialTargetId,
+                ActiveIndividualSensors=o.ActiveIndividualSensors,
+                AnimalFoodAffinity=Genomes.Get(o.GenomeId).Metabolism.AnimalFoodAffinity,
                 BodyCenterElevation=BodyCenterElevation(o),AppendageRegions=o.AppendageRegions.ToArray(),
                 AppendageContactCount=o.AppendageContactCount,AppendageSupport=o.AppendageSupport,
                 AppendageGroundVelocity=o.AppendageGroundVelocity,AppendageEnergyLastStep=o.AppendageEnergyLastStep,
@@ -693,7 +702,7 @@ public sealed class SimulationWorld
             ControllerState = new double[genome.ControllerNodes.Count],
             SensorState = new double[genome.Sensors.Count],
             TissueControllerInputs = new double[genome.ControllerNodes.Count],
-            ForagingMemory = new ForagingMemory(), Body = body,
+            ForagingMemory = new ForagingMemory(), SocialMemory = new SocialMemory(), Body = body,
             Pose = new BodyPose(genome, body), Generation = parent.Generation + 1,
             AppendageMechanics=new AppendageMechanics(),AppendageRegions=[],
             CavityState=new CavitySystemState(),
@@ -778,7 +787,7 @@ public sealed class SimulationWorld
         double Cue(EnvironmentSample sample)
         {
             double available=Math.Max(0.0,sample.Minerals*production+
-                (sample.ProducerBiomass+sample.EdibleOrganics)*feeding+sample.Detritus*decomposition);
+                (sample.ProducerBiomass+sample.EdibleOrganics*genome.Metabolism.AnimalFoodAffinity)*feeding+sample.Detritus*decomposition);
             return (available/(0.12+available))*(0.35+0.65*(1.0-reserve));
         }
         double cue=Cue(centerSample);
@@ -811,6 +820,72 @@ public sealed class SimulationWorld
         double oxygen=sample.WaterDepth>0?sample.DissolvedOxygenAvailability:sample.AirOxygenAvailability;
         return Math.Clamp(dry+(0.45*pressure)+(0.35*Math.Max(0,0.25-oxygen)),0,1);
     }
+
+    private readonly List<SocialCandidate> _socialCandidates = new(8);
+
+    private SocialMotorResponse UpdateSocial(ref Organism organism, Genome genome,
+        SpatialOccupancyIndex occupancy, double dt)
+    {
+        organism.SocialMemory.Advance(dt);
+        if (organism.Body.TotalEnergy <= _config.MaximumEnergy * _config.ForagingRestEnergyFraction)
+            organism.ActiveIndividualSensors = 0;
+        if ((StepIndex + (long)organism.Id) % 5 == 0 &&
+            organism.Body.TotalEnergy > _config.MaximumEnergy * _config.ForagingRestEnergyFraction)
+        {
+            organism.ActiveIndividualSensors = 0;
+            double range = 0;
+            foreach (SensorGene sensor in genome.Sensors)
+            {
+                if (sensor.Channel != SensorChannel.OrganismContrast) continue;
+                int index = organism.Body.IndexOfRegion(sensor.SourceRegionId);
+                if(index >= 0 && organism.Body.Regions[index].SensoryExpression > 1e-6)
+                    range = Math.Max(range, Math.Min(12, sensor.Range));
+            }
+            if (range > 0)
+            {
+                _socialCandidates.Clear();
+                int inspected = 0;
+                foreach (SpatialOccupant other in occupancy.Query(organism.Position,(float)range))
+                {
+                    if(other.Id == organism.Id) continue;
+                    if(++inspected > 48) break;
+                    double distance=SphericalWorld.Distance(organism.Position,other.Position,_config.WorldSize);
+                    if(distance>range) continue;
+                    EnvironmentSample sample=_environment.Sample(other.Position,other.Depth);
+                    float elevation=(float)(sample.WaterDepth>0 ? sample.WaterSurface-other.Depth :
+                        sample.TerrainHeight+other.Shape.VerticalHalfExtent);
+                    SocialCandidate candidate=new(other.Id,other.Position,other.Depth,
+                        other.Shape.HorizontalRadius,elevation);
+                    int slot=0;
+                    while(slot<_socialCandidates.Count && SphericalWorld.Distance(organism.Position,
+                        _socialCandidates[slot].Position,_config.WorldSize)<=distance) slot++;
+                    if(slot>=8) continue;
+                    _socialCandidates.Insert(slot,candidate);
+                    if(_socialCandidates.Count>8) _socialCandidates.RemoveAt(8);
+                }
+                SocialPerceptionResult sight=SocialPerception.Evaluate(organism.Body,genome,_environment,
+                    organism.Position,organism.Depth,organism.HeadingRadians,_socialCandidates,_config,dt*5);
+                organism.ActiveIndividualSensors=sight.ActiveSensors;
+                organism.SocialMemory.Observe(sight);
+                organism.SensingEnergyLastStep+=sight.EnergySpent;
+                CumulativeDissipatedEnergy+=sight.EnergySpent;
+            }
+        }
+        SocialMotorResponse response=organism.SocialMemory.Respond(organism.Body,genome,
+            organism.Position,organism.HeadingRadians,_config,dt);
+        organism.SocialResponse=response.Mode;
+        organism.SocialTargetId=response.TargetId;
+        organism.SensingEnergyLastStep+=response.EnergySpent;
+        CumulativeDissipatedEnergy+=response.EnergySpent;
+        return response;
+    }
+
+    private static ControllerOutputs ApplySocialDrive(ControllerOutputs output, SocialMotorResponse social)
+        => output with
+        {
+            LateralContraction=Math.Clamp(output.LateralContraction+social.Steering,-1,1),
+            ContractionActivation=Math.Clamp(output.ContractionActivation*(1+0.6*social.Activation),0,1)
+        };
 
     private static ControllerOutputs ApplyForagingDrive(ControllerOutputs output,ForagingDecision foraging)
         =>output with
@@ -855,13 +930,18 @@ public sealed class SimulationWorld
         // rather than an acceleration.  Separation is the only acceleration here.
         organism.Velocity = reactionVelocity + separation * (float)dt;
         double angularVelocity=appendage.AngularVelocity+mechanics.AngularVelocity;
-        organism.HeadingRadians = NormalizeAngle(organism.HeadingRadians + angularVelocity * dt);
         organism.LocalActuationForce = mechanics.NetExternalForce;
         organism.ActuationTorque = mechanics.NetExternalTorque;
         float maxSpeed = (float)(_config.MaximumMovementSpeed * mobility /
             (1 + 0.08 * body.Drag / Math.Max(0.1, body.PhysicalMass)));
         if (organism.Velocity.Length() > maxSpeed && maxSpeed > 0)
-            organism.Velocity = Vector2.Normalize(organism.Velocity) * maxSpeed;
+        {
+            float scale = maxSpeed / organism.Velocity.Length();
+            organism.Velocity *= scale;
+            // Preserve the solved trajectory curvature when bounding locomotion.
+            angularVelocity *= scale;
+        }
+        organism.HeadingRadians = NormalizeAngle(organism.HeadingRadians + angularVelocity * dt);
         Vector2 displacement = organism.Velocity * (float)dt;
         CumulativeDissipatedEnergy += mechanics.EnergySpent+appendage.EnergySpent;
         CumulativeMovementEnergy += mechanics.EnergySpent+appendage.EnergySpent;
@@ -1062,12 +1142,17 @@ public sealed class SimulationWorld
         return new(states,occupancy,pairs.Count);
     }
 
+    private readonly HashSet<ulong> _retaliatedThisStep = [];
+
     private void ApplyContactPredation(int[] opponents, double dt)
     {
+        _retaliatedThisStep.Clear();
         for (int index = 0; index < _organisms.Count; index++)
         {
             Organism organism = _organisms[index];
             organism.PredationLastStep = 0;
+            organism.AttackDamageLastStep = 0;
+            organism.RetaliationDamageLastStep = 0;
             organism.PredationEnergyLastStep = 0;
             _organisms[index] = organism;
         }
@@ -1083,8 +1168,25 @@ public sealed class SimulationWorld
                 predator.Body, Genomes.Get(predator.GenomeId), predator.Position, predator.Depth,
                 prey.Body, Genomes.Get(prey.GenomeId), prey.Position, prey.Depth, _environment, dt,
                 _config.WorldSize);
-            predator.PredationLastStep = result.AssimilatedOrganic;
-            predator.PredationEnergyLastStep = result.EnergySpent;
+            if(result.Damage>0) prey.SocialMemory.RecordInjury(predator.Id,predator.Position,result.Damage);
+            predator.AttackDamageLastStep += result.Damage;
+            predator.PredationLastStep += result.AssimilatedOrganic;
+            predator.PredationEnergyLastStep += result.EnergySpent;
+            if(result.Damage>0 && _retaliatedThisStep.Add(prey.Id))
+            {
+                PredationResult counter=ContactPredation.Attempt(
+                    prey.Body,Genomes.Get(prey.GenomeId),prey.Position,prey.Depth,
+                    predator.Body,Genomes.Get(predator.GenomeId),predator.Position,predator.Depth,
+                    _environment,dt,_config.WorldSize,retaliation:true);
+                if(counter.Damage>0)
+                    predator.SocialMemory.RecordInjury(prey.Id,prey.Position,counter.Damage);
+                prey.RetaliationDamageLastStep+=counter.Damage;
+                prey.PredationLastStep+=counter.AssimilatedOrganic;
+                prey.PredationEnergyLastStep+=counter.EnergySpent;
+                _organisms[target]=prey;
+                CumulativePredationOrganic+=counter.AssimilatedOrganic;
+                CumulativeDissipatedEnergy+=counter.EnergySpent;
+            }
             _organisms[index] = predator;
             CumulativePredationOrganic += result.AssimilatedOrganic;
             CumulativeDissipatedEnergy += result.EnergySpent;
@@ -1181,6 +1283,7 @@ public sealed class SimulationWorld
         foreach (Organism o in _organisms)
         {
             FingerprintHash.Add(ref hash, o.Id); FingerprintHash.Add(ref hash, o.ParentId);
+            o.SocialMemory.AddFingerprint(ref hash);
             FingerprintHash.Add(ref hash, unchecked((ulong)o.GenomeId));
             FingerprintHash.Add(ref hash, unchecked((ulong)o.BirthMutationCount));
             FingerprintHash.Add(ref hash, unchecked((uint)BitConverter.SingleToInt32Bits(o.Position.X)));

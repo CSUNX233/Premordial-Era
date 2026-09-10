@@ -34,7 +34,7 @@ public static class AquaticFounderFactory
                 CavityFraction=0,CavityAperture=0,JointRestPitch=0,JointMobility=0,
                 PhotosyntheticExpression=Range(0.68,0.94),
                 FeedingExpression=Range(0.05,0.18),DigestiveExpression=Range(0.12,0.28),
-                DecomposerExpression=Range(0.02,0.10)
+                DecomposerExpression=0.0
             };
         }
 
@@ -68,7 +68,8 @@ public static class AquaticFounderFactory
             new(SensorChannel.Hydration,random.NextInt(count),1,Range(0.4,0.7),Range(1.2,2.4))
         ];
         return new Genome(regions,Range(0.22,0.32),
-            new MetabolicGene(Range(0.25,0.42),Range(0.40,0.58),Range(0.10,0.28),Range(0.60,0.85)),
+            new MetabolicGene(Range(0.25,0.42),Range(0.40,0.58),Range(0.10,0.28),Range(0.60,0.85),
+                AnimalFoodAffinity:0.0, AttackAffinity:0.0, RetaliationAffinity:0.0),
             controller,sensors);
     }
 }

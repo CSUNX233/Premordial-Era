@@ -260,6 +260,14 @@ public sealed class BodyPose
             a[2,2]+=qx*(zxx*qx+zxy*qy)+qy*(zxy*qx+zyy*qy);
             double fx=zxx*v.X+zxy*v.Y, fy=zxy*v.X+zyy*v.Y;
             b[0]-=fx; b[1]-=fy; b[2]-=r.X*fy-r.Y*fx;
+            // A finite region resists rotation about its own centre as well as
+            // translation of that centre. Point-only drag leaves compact bodies
+            // with almost no rotational resistance and amplifies tiny shape motion.
+            double spinDrag = (perpendicular * pose.Length * pose.Length +
+                parallel * pose.Width * pose.Width) / 12.0;
+            double shapeSpin = Normalize(pose.Angle - prior.Angle) / dt;
+            a[2,2] += spinDrag;
+            b[2] -= spinDrag * shapeSpin;
         }
         a[2,2]+=1e-6;
         double[] solution = Solve3(a,b);

@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 
 namespace NativeEpoch.Simulation;
 
@@ -28,6 +28,8 @@ public struct Organism
     public double DecompositionLastStep;
     public double PrimaryProductionLastStep;
     public double PredationLastStep;
+    public double AttackDamageLastStep;
+    public double RetaliationDamageLastStep;
     public double PredationEnergyLastStep;
     public double DehydrationCostLastStep;
     public double ContactPressure;
@@ -50,6 +52,10 @@ public struct Organism
     public double ChemicalSenseAccess;
     public double SensingEnergyLastStep;
     public ForagingMemory ForagingMemory;
+    public SocialMemory SocialMemory;
+    public SocialResponse SocialResponse;
+    public ulong SocialTargetId;
+    public int ActiveIndividualSensors;
     public ControllerInputs ControllerInputs;
     public ControllerOutputs ControllerOutputs;
     public double ForagingCue;
@@ -94,6 +100,8 @@ public struct Organism
         double.IsFinite(OrganicFeedingLastStep) && OrganicFeedingLastStep >= 0 &&
         double.IsFinite(DecompositionLastStep) && DecompositionLastStep >= 0 &&
         double.IsFinite(PrimaryProductionLastStep) && PrimaryProductionLastStep >= 0 &&
+        double.IsFinite(AttackDamageLastStep) && AttackDamageLastStep>=0 &&
+        double.IsFinite(RetaliationDamageLastStep) && RetaliationDamageLastStep>=0 &&
         double.IsFinite(PredationLastStep) && PredationLastStep >= 0 &&
         double.IsFinite(PredationEnergyLastStep) && PredationEnergyLastStep >= 0 &&
         double.IsFinite(DehydrationCostLastStep) && DehydrationCostLastStep >= 0.0 &&
@@ -113,6 +121,7 @@ public struct Organism
         ChemicalSenseAccess is >=0.0 and <=1.0 &&
         double.IsFinite(SensingEnergyLastStep) && SensingEnergyLastStep>=0.0 &&
         ForagingMemory is not null && ForagingMemory.AllFinite &&
+        SocialMemory is not null && SocialMemory.AllFinite &&
         ControllerInputs.AllFinite &&
         ControllerOutputs.AllFinite &&
         double.IsFinite(ForagingCue) && double.IsFinite(ForagingTrend) &&

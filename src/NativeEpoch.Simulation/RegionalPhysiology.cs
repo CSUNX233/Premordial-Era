@@ -83,12 +83,16 @@ public static class RegionalPhysiology
         DevelopingBody body,
         Genome genome,
         double offeredOrganic,
-        double deltaSeconds)
+        double deltaSeconds,
+        double maximumAssimilationEfficiency = 0.85)
     {
         if (!double.IsFinite(offeredOrganic) || offeredOrganic < 0.0)
             throw new ArgumentOutOfRangeException(nameof(offeredOrganic));
         if (!double.IsFinite(deltaSeconds) || deltaSeconds <= 0.0)
             throw new ArgumentOutOfRangeException(nameof(deltaSeconds));
+        if (!double.IsFinite(maximumAssimilationEfficiency) ||
+            maximumAssimilationEfficiency is < 0.0 or > 1.0)
+            throw new ArgumentOutOfRangeException(nameof(maximumAssimilationEfficiency));
         double processLimit = Math.Min(offeredOrganic,
             body.Cache.DigestiveCapacity * DigestiveThroughputPerCapacity * deltaSeconds);
         double remaining = processLimit;
@@ -108,6 +112,7 @@ public static class RegionalPhysiology
             double efficiency = Math.Clamp(0.35 +
                 (0.45 * gene.CatalyticActivity * (0.25 + (0.75 * region.TransportAvailability))),
                 0.35, 0.85);
+            efficiency = Math.Min(efficiency, maximumAssimilationEfficiency);
             double room = Math.Max(0.0, SubstrateCapacity(region, gene) - region.Substrate);
             double requested = Math.Min(remaining, Math.Min(
                 region.Matter * machinery * DigestiveThroughputPerCapacity * deltaSeconds,
@@ -620,7 +625,12 @@ public static class RegionalPhysiology
             body.ApplyInventoryDelta(updated.RegionId, new RegionalInventoryDelta(0.0, 0.0, 0.0, -paid));
             maintenancePaid += paid;
             if (paid + 1e-12 < maintenance)
-                body.AddDamage(updated.RegionId, (maintenance - paid) * 0.02);
+            {
+                // Damage reflects the fraction of essential upkeep not supplied,
+                // rather than an absolute energy debt that makes tiny bodies immortal.
+                double deficitFraction = Math.Clamp((maintenance - paid) / maintenance, 0.0, 1.0);
+                body.AddDamage(updated.RegionId, deficitFraction * deltaSeconds / config.MaintenanceFailureSeconds);
+            }
         }
         environment.DepositMetabolicWaste(position, waste);
         return new RegionalMetabolismResult(

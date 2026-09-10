@@ -27,6 +27,7 @@ public sealed record SimulationConfig
     public double LightEnergyPerSurfacePerSecond { get; init; } = 1.45;
     public double SurfaceLightEnergyPerWorldAreaPerSecond { get; init; } = 0.05;
     public double BaseMaintenanceEnergyPerSecond { get; init; } = 0.004;
+    public double MaintenanceFailureSeconds { get; init; } = 120.0;
     public double GrowthMatterPerSecond { get; init; } = 0.18;
     public double GrowthEnergyPerMatter { get; init; } = 0.05;
     public double PropulsionAccelerationScale { get; init; } = 1.6;
@@ -107,6 +108,8 @@ public sealed record SimulationConfig
             throw new ArgumentOutOfRangeException(nameof(PreferredAquaticSpawnMaximumDepth));
         if (!double.IsFinite(InitialAquaticDepthFraction) || InitialAquaticDepthFraction is <= 0.0 or >= 1.0)
             throw new ArgumentOutOfRangeException(nameof(InitialAquaticDepthFraction));
+        if (!double.IsFinite(MaintenanceFailureSeconds) || MaintenanceFailureSeconds <= 0.0)
+            throw new ArgumentOutOfRangeException(nameof(MaintenanceFailureSeconds));
         if (CoreInitialMatter <= 0.0)
             throw new InvalidOperationException("A newborn core must contain positive matter.");
         if (ReproductionEnergyCost < NewbornEnergy)

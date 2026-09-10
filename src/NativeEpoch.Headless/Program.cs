@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using NativeEpoch.Simulation;
 
 return HeadlessProgram.Run(args);
@@ -9,6 +9,24 @@ internal static class HeadlessProgram
     {
         try
         {
+            if (args.Contains("--diagnose-social"))
+            {
+                var genetics = SocialSensorGeneticsDiagnostics.Run();
+                var perception = SocialPerceptionDiagnostics.Run();
+                var behavior = SocialBehaviorDiagnostics.Run();
+                var diet = DietOrganicAllocationDiagnostics.Run();
+                var world = SocialWorldDiagnostics.Run();
+                var combat = SocialCombatWorldDiagnostics.Run();
+                bool passed = genetics.Passed && perception.Passed && behavior.Passed && diet.Passed && world.Passed && combat.Passed;
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { genetics, perception, behavior, diet, world, combat }));
+                Console.WriteLine(passed ? "SOCIAL PASS" : "SOCIAL FAIL");
+                return passed ? 0 : 1;
+            }
+            if (args.Contains("--diagnose-population-movement"))
+            {
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(PopulationMovementDiagnostics.Run()));
+                return 0;
+            }
             bool diagnoseSphere = args.Contains("--diagnose-sphere");
             bool diagnoseFoodWeb = args.Contains("--diagnose-food-web");
             bool diagnoseLandResources = args.Contains("--diagnose-land-resources");
@@ -797,6 +815,7 @@ internal static class HeadlessProgram
         Console.WriteLine("  --diagnose-land-resources check finite inland/coastal/ocean resources and relocation");
         Console.WriteLine("  --diagnose-sensing-behavior check paid chemical/visual steering and receptor loss");
         Console.WriteLine("  --diagnose-photosynthesis check pigment expression, light conversion and costs");
+        Console.WriteLine("  --diagnose-population-movement report 24 founder trajectories over 120 seconds");
         Console.WriteLine("  --diagnose-sphere check spherical topology, seeded oceans and conservation");
         Console.WriteLine("  --diagnose-food-web check producers, consumption, decomposition and contact predation");
         Console.WriteLine("  --experiment-adaptation run three bounded natural-lineage paired assays");

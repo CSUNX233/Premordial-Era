@@ -158,9 +158,13 @@ public static class MutationDistributionDiagnostics
         }
         changed += CountDifferences(
             [left.Metabolism.OxygenUseFraction, left.Metabolism.OxygenCatalysis,
-             left.Metabolism.WaterRetention, left.Metabolism.OsmoticTolerance],
+             left.Metabolism.WaterRetention, left.Metabolism.OsmoticTolerance,
+             left.Metabolism.AnimalFoodAffinity, left.Metabolism.AttackAffinity,
+             left.Metabolism.RetaliationAffinity],
             [right.Metabolism.OxygenUseFraction, right.Metabolism.OxygenCatalysis,
-             right.Metabolism.WaterRetention, right.Metabolism.OsmoticTolerance]);
+             right.Metabolism.WaterRetention, right.Metabolism.OsmoticTolerance,
+             right.Metabolism.AnimalFoodAffinity, right.Metabolism.AttackAffinity,
+             right.Metabolism.RetaliationAffinity]);
         for (int index = 0; index < left.ControllerNodes.Count; index++)
         {
             ControllerNodeGene a = left.ControllerNodes[index], b = right.ControllerNodes[index];
@@ -231,5 +235,8 @@ public static class MutationDistributionDiagnostics
     ];
 
     private static double[] SensorScalars(SensorGene g) =>
-    [g.Gain, g.ResponseRate, g.DirectionOffsetRadians, g.Range, g.DirectionalSelectivity];
+    [
+        g.Gain, g.ResponseRate, g.DirectionOffsetRadians, g.Range, g.DirectionalSelectivity,
+        g.ApproachWeight, g.AvoidanceWeight, g.TargetMemorySeconds
+    ];
 }

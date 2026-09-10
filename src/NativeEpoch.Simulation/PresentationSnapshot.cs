@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.Numerics;
 
 namespace NativeEpoch.Simulation;
@@ -68,6 +68,14 @@ public readonly record struct OrganismPresentationState(
     public double SensingEnergyLastStep { get; init; }
     public int ActiveVisualSensorCount { get; init; }
     public double VisionSignal { get; init; }
+    public SocialResponse SocialResponse { get; init; }
+    public ulong SocialTargetId { get; init; }
+    public int ActiveIndividualSensors { get; init; }
+    public double AnimalFoodAffinity { get; init; }
+    public double AttackAffinity { get; init; }
+    public double RetaliationAffinity { get; init; }
+    public double AttackDamageLastStep { get; init; }
+    public double RetaliationDamageLastStep { get; init; }
     public double BodyCenterElevation { get; init; } = double.NaN;
     public IReadOnlyList<AppendageRegionPose> AppendageRegions { get; init; } = Array.Empty<AppendageRegionPose>();
     public int AppendageContactCount { get; init; }

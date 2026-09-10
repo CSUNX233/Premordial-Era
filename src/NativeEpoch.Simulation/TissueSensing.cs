@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 
 namespace NativeEpoch.Simulation;
 
@@ -49,6 +49,7 @@ public static class TissueSensing
         for(int index=0;index<sensorCount;index++)
         {
             SensorGene sensor=genome.Sensors[index];
+            if(sensor.Channel==SensorChannel.OrganismContrast){sensorState[index]=0;continue;}
             int bodyIndex=body.IndexOfRegion(sensor.SourceRegionId);
             if(bodyIndex<0){sensorState[index]=0;continue;}
             BodyRegion region=body.Regions[bodyIndex];
@@ -71,7 +72,7 @@ public static class TissueSensing
             double raw=sensor.Channel switch
             {
                 SensorChannel.ChemicalResource=>Math.Clamp((sample.Minerals*region.PhotosyntheticExpression+
-                    (sample.ProducerBiomass+sample.EdibleOrganics)*region.FeedingExpression*region.DigestiveExpression+
+                    (sample.ProducerBiomass+sample.EdibleOrganics*genome.Metabolism.AnimalFoodAffinity)*region.FeedingExpression*region.DigestiveExpression+
                     sample.Detritus*region.DecomposerExpression)/2.0,0.0,1.0),
                 SensorChannel.ContactPressure=>Math.Clamp(contactPressure,0.0,1.0),
                 SensorChannel.InternalEnergy=>Math.Clamp(region.Energy/Math.Max(0.1,config.MaximumEnergy),0.0,1.0),

@@ -119,7 +119,8 @@ public readonly record struct OrganicUptakeRequest(
     ulong OrganismId,
     Vector2 Position,
     double RequestedMatter,
-    double ProducerPreference = 0.75);
+    double ProducerPreference = 0.75,
+    double LooseOrganicAffinity = 1.0);
 
 public readonly record struct OrganicReservation(
     ulong OrganismId,
@@ -609,51 +610,227 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
             double algae = _algae[group.Key];
             double loose = _edibleOrganics[group.Key];
             double available = land + algae + loose;
-            double fraction = requested > 0.0 ? Math.Min(1.0, available / requested) : 0.0;
             foreach (OrganicUptakeRequest request in ordered)
                 if (!double.IsFinite(request.RequestedMatter) || request.RequestedMatter < 0.0 ||
-                    !double.IsFinite(request.ProducerPreference) || request.ProducerPreference is < 0.0 or > 1.0)
-                    throw new InvalidOperationException("Organic requests must be finite and preferences must be in [0,1].");
-            double allocated = requested * fraction;
-            double producerAvailable = land + algae;
-            double preference = requested > 0.0
-                ? ordered.Sum(request => request.RequestedMatter * request.ProducerPreference) / requested
-                : 0.0;
-            double producerTake = Math.Min(producerAvailable, allocated * preference);
-            double looseTake = Math.Min(loose, allocated - producerTake);
-            producerTake += Math.Min(
-                producerAvailable - producerTake,
-                Math.Max(0.0, allocated - producerTake - looseTake));
-            looseTake += Math.Min(
-                loose - looseTake,
-                Math.Max(0.0, allocated - producerTake - looseTake));
-            double landTake = producerAvailable > 0.0 ? producerTake * land / producerAvailable : 0.0;
-            double algaeTake = producerTake - landTake;
-            double totalLand = 0.0, totalAlgae = 0.0, totalLoose = 0.0;
-            foreach (OrganicUptakeRequest request in ordered)
-            {
-                if (reservations.ContainsKey(request.OrganismId))
-                    throw new InvalidOperationException("Each organism may submit one finite organic request per allocation cycle.");
+                    !double.IsFinite(request.ProducerPreference) || request.ProducerPreference is < 0.0 or > 1.0 ||
+                    !double.IsFinite(request.LooseOrganicAffinity) || request.LooseOrganicAffinity is < 0.0 or > 1.0)
+                    throw new InvalidOperationException("Organic requests must be finite and preferences and affinities must be in [0,1].");
 
-                double amount = request.RequestedMatter * fraction;
-                double allocationShare = allocated > 0.0 ? amount / allocated : 0.0;
-                OrganicReservation reservation = new(
-                    request.OrganismId,
-                    group.Key,
-                    landTake * allocationShare,
-                    algaeTake * allocationShare,
-                    looseTake * allocationShare);
-                reservations.Add(request.OrganismId, reservation);
-                _activeOrganicReservations.Add(request.OrganismId, reservation);
-                totalLand += reservation.LandPlants;
-                totalAlgae += reservation.Algae;
-                totalLoose += reservation.EdibleOrganics;
+            if (ordered.All(request => request.LooseOrganicAffinity == 1.0))
+            {
+                ReserveUnrestrictedOrganic(
+                    group.Key, ordered, requested, land, algae, loose, available, reservations);
+                continue;
             }
-            Remove(_landPlants, group.Key, Math.Min(land, totalLand));
-            Remove(_algae, group.Key, Math.Min(algae, totalAlgae));
-            Remove(_edibleOrganics, group.Key, Math.Min(loose, totalLoose));
+
+            ReserveDietAwareOrganic(group.Key, ordered, land, algae, loose, reservations);
         }
         return reservations;
+    }
+
+    private void ReserveUnrestrictedOrganic(
+        int cellIndex,
+        OrganicUptakeRequest[] ordered,
+        double requested,
+        double land,
+        double algae,
+        double loose,
+        double available,
+        Dictionary<ulong, OrganicReservation> reservations)
+    {
+        double fraction = requested > 0.0 ? Math.Min(1.0, available / requested) : 0.0;
+        double allocated = requested * fraction;
+        double producerAvailable = land + algae;
+        double preference = requested > 0.0
+            ? ordered.Sum(request => request.RequestedMatter * request.ProducerPreference) / requested
+            : 0.0;
+        double producerTake = Math.Min(producerAvailable, allocated * preference);
+        double looseTake = Math.Min(loose, allocated - producerTake);
+        producerTake += Math.Min(
+            producerAvailable - producerTake,
+            Math.Max(0.0, allocated - producerTake - looseTake));
+        looseTake += Math.Min(
+            loose - looseTake,
+            Math.Max(0.0, allocated - producerTake - looseTake));
+        double landTake = producerAvailable > 0.0 ? producerTake * land / producerAvailable : 0.0;
+        double algaeTake = producerTake - landTake;
+        double totalLand = 0.0, totalAlgae = 0.0, totalLoose = 0.0;
+        foreach (OrganicUptakeRequest request in ordered)
+        {
+            if (reservations.ContainsKey(request.OrganismId))
+                throw new InvalidOperationException("Each organism may submit one finite organic request per allocation cycle.");
+
+            double amount = request.RequestedMatter * fraction;
+            double allocationShare = allocated > 0.0 ? amount / allocated : 0.0;
+            OrganicReservation reservation = new(
+                request.OrganismId,
+                cellIndex,
+                landTake * allocationShare,
+                algaeTake * allocationShare,
+                looseTake * allocationShare);
+            reservations.Add(request.OrganismId, reservation);
+            _activeOrganicReservations.Add(request.OrganismId, reservation);
+            totalLand += reservation.LandPlants;
+            totalAlgae += reservation.Algae;
+            totalLoose += reservation.EdibleOrganics;
+        }
+        Remove(_landPlants, cellIndex, Math.Min(land, totalLand));
+        Remove(_algae, cellIndex, Math.Min(algae, totalAlgae));
+        Remove(_edibleOrganics, cellIndex, Math.Min(loose, totalLoose));
+    }
+
+    private void ReserveDietAwareOrganic(
+        int cellIndex,
+        OrganicUptakeRequest[] ordered,
+        double land,
+        double algae,
+        double loose,
+        Dictionary<ulong, OrganicReservation> reservations)
+    {
+        int count = ordered.Length;
+        double producerAvailable = land + algae;
+        double[] targets = new double[count];
+        double[] looseCaps = new double[count];
+        double totalRequested = 0.0;
+        for (int index = 0; index < count; index++)
+        {
+            totalRequested += ordered[index].RequestedMatter;
+            looseCaps[index] = ordered[index].RequestedMatter * ordered[index].LooseOrganicAffinity;
+        }
+
+        // Give every competitor the same fraction of its request that the two
+        // finite pools can jointly support. A consumer's loose cap is individual,
+        // so a flexible neighbor can never make carrion eligible for a herbivore.
+        double low = 0.0, high = 1.0;
+        for (int iteration = 0; iteration < 64; iteration++)
+        {
+            double fraction = (low + high) * 0.5;
+            double targetTotal = totalRequested * fraction;
+            double eligibleLoose = 0.0;
+            for (int index = 0; index < count; index++)
+                eligibleLoose += Math.Min(
+                    ordered[index].RequestedMatter * fraction,
+                    looseCaps[index]);
+            double producerNeeded = targetTotal - Math.Min(loose, eligibleLoose);
+            if (targetTotal <= producerAvailable + loose && producerNeeded <= producerAvailable)
+                low = fraction;
+            else
+                high = fraction;
+        }
+
+        double targetSum = 0.0;
+        double[] desiredLoose = new double[count];
+        double[] looseAllocations = new double[count];
+        for (int index = 0; index < count; index++)
+        {
+            targets[index] = ordered[index].RequestedMatter * low;
+            targetSum += targets[index];
+            looseCaps[index] = Math.Min(looseCaps[index], targets[index]);
+            desiredLoose[index] = Math.Min(
+                looseCaps[index],
+                targets[index] * (1.0 - ordered[index].ProducerPreference));
+        }
+
+        double maximumLoose = Math.Min(loose, looseCaps.Sum());
+        double requiredLoose = Math.Min(maximumLoose, Math.Max(0.0, targetSum - producerAvailable));
+        double preferredLoose = Math.Min(maximumLoose, desiredLoose.Sum());
+        double looseTarget = Math.Max(requiredLoose, preferredLoose);
+        double looseTaken = AllocateProportionally(looseTarget, desiredLoose, looseAllocations);
+
+        if (looseTaken < looseTarget)
+        {
+            double[] remainingCaps = new double[count];
+            for (int index = 0; index < count; index++)
+                remainingCaps[index] = Math.Max(0.0, looseCaps[index] - looseAllocations[index]);
+            looseTaken += AllocateProportionally(
+                looseTarget - looseTaken, remainingCaps, looseAllocations);
+        }
+
+        double[] producerAllocations = new double[count];
+        double producerTaken = 0.0;
+        for (int index = 0; index < count; index++)
+        {
+            producerAllocations[index] = Math.Max(0.0, targets[index] - looseAllocations[index]);
+            producerTaken += producerAllocations[index];
+        }
+
+        // Once a restricted diet fixes the common fair share, a compatible pool
+        // may remain. Distribute it among eligible unmet requests in bounded passes.
+        double[] unmet = new double[count];
+        double[] extraLooseCaps = new double[count];
+        for (int index = 0; index < count; index++)
+        {
+            unmet[index] = Math.Max(0.0, ordered[index].RequestedMatter - targets[index]);
+            extraLooseCaps[index] = Math.Min(
+                unmet[index],
+                Math.Max(0.0,
+                    ordered[index].RequestedMatter * ordered[index].LooseOrganicAffinity -
+                    looseAllocations[index]));
+        }
+        looseTaken += AllocateProportionally(
+            Math.Max(0.0, loose - looseTaken), extraLooseCaps, looseAllocations);
+        for (int index = 0; index < count; index++)
+            unmet[index] = Math.Max(
+                0.0,
+                ordered[index].RequestedMatter - producerAllocations[index] - looseAllocations[index]);
+        producerTaken += AllocateProportionally(
+            Math.Max(0.0, producerAvailable - producerTaken), unmet, producerAllocations);
+
+        double landFraction = producerAvailable > 0.0 ? land / producerAvailable : 0.0;
+        double totalLand = 0.0, totalAlgae = 0.0, totalLoose = 0.0;
+        for (int index = 0; index < count; index++)
+        {
+            OrganicUptakeRequest request = ordered[index];
+            if (reservations.ContainsKey(request.OrganismId))
+                throw new InvalidOperationException("Each organism may submit one finite organic request per allocation cycle.");
+            double landTake = producerAllocations[index] * landFraction;
+            OrganicReservation reservation = new(
+                request.OrganismId,
+                cellIndex,
+                landTake,
+                producerAllocations[index] - landTake,
+                looseAllocations[index]);
+            reservations.Add(request.OrganismId, reservation);
+            _activeOrganicReservations.Add(request.OrganismId, reservation);
+            totalLand += reservation.LandPlants;
+            totalAlgae += reservation.Algae;
+            totalLoose += reservation.EdibleOrganics;
+        }
+        Remove(_landPlants, cellIndex, Math.Min(land, totalLand));
+        Remove(_algae, cellIndex, Math.Min(algae, totalAlgae));
+        Remove(_edibleOrganics, cellIndex, Math.Min(loose, totalLoose));
+    }
+
+    private static double AllocateProportionally(
+        double available,
+        IReadOnlyList<double> capacities,
+        double[] allocations)
+    {
+        double capacity = 0.0;
+        for (int index = 0; index < capacities.Count; index++)
+            capacity += capacities[index];
+        if (available <= 0.0 || capacity <= 0.0) return 0.0;
+
+        double target = Math.Min(available, capacity);
+        double remaining = target;
+        double allocated = 0.0;
+        int lastEligible = -1;
+        for (int index = capacities.Count - 1; index >= 0; index--)
+            if (capacities[index] > 0.0)
+            {
+                lastEligible = index;
+                break;
+            }
+        for (int index = 0; index < capacities.Count; index++)
+        {
+            double amount = index == lastEligible
+                ? Math.Min(capacities[index], remaining)
+                : Math.Min(remaining, capacities[index] * target / capacity);
+            allocations[index] += amount;
+            allocated += amount;
+            remaining -= amount;
+        }
+        return allocated;
     }
 
     public void ReturnOrganic(OrganicReservation reservation, double unusedAmount)

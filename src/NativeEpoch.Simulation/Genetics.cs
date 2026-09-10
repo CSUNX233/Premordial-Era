@@ -17,7 +17,6 @@ public enum MutationKind
 }
 
 // These are bounded local physical/chemical signals, not organs or behaviours.
-// Directional image/light sampling is deliberately absent from this phase.
 public enum SensorChannel
 {
     ChemicalResource,
@@ -27,7 +26,8 @@ public enum SensorChannel
     AmbientLight,
     Temperature,
     Pressure,
-    DirectionalLight
+    DirectionalLight,
+    OrganismContrast
 }
 
 public readonly record struct SensorGene(
@@ -38,18 +38,25 @@ public readonly record struct SensorGene(
     double ResponseRate,
     double DirectionOffsetRadians = 0.0,
     double Range = 2.0,
-    double DirectionalSelectivity = 0.5)
+    double DirectionalSelectivity = 0.5,
+    double ApproachWeight = 0.0,
+    double AvoidanceWeight = 0.5,
+    double TargetMemorySeconds = 1.5)
 {
     public bool AllFinite => double.IsFinite(Gain) && double.IsFinite(ResponseRate) &&
         double.IsFinite(DirectionOffsetRadians) && double.IsFinite(Range) &&
-        double.IsFinite(DirectionalSelectivity);
+        double.IsFinite(DirectionalSelectivity) && double.IsFinite(ApproachWeight) &&
+        double.IsFinite(AvoidanceWeight) && double.IsFinite(TargetMemorySeconds);
 }
 
 public readonly record struct MetabolicGene(
     double OxygenUseFraction,
     double OxygenCatalysis,
     double WaterRetention,
-    double OsmoticTolerance)
+    double OsmoticTolerance,
+    double AnimalFoodAffinity = 0.0,
+    double AttackAffinity = 0.0,
+    double RetaliationAffinity = 0.0)
 {
     public static MetabolicGene AquaticAncestor => new(0.35, 0.48, 0.20, 0.72);
 
@@ -57,7 +64,10 @@ public readonly record struct MetabolicGene(
         double.IsFinite(OxygenUseFraction) &&
         double.IsFinite(OxygenCatalysis) &&
         double.IsFinite(WaterRetention) &&
-        double.IsFinite(OsmoticTolerance);
+        double.IsFinite(OsmoticTolerance) &&
+        double.IsFinite(AnimalFoodAffinity) &&
+        double.IsFinite(AttackAffinity) &&
+        double.IsFinite(RetaliationAffinity);
 }
 
 public readonly record struct ControllerNodeGene(
@@ -218,7 +228,7 @@ public sealed class Genome
             0.25, 0.20, 0.50, 0.55, 0.45,
             0.62, 0.32, 0.58, 0.48, 0.55) with
             { PhotosyntheticExpression = 0.76, FeedingExpression = 0.10,
-                DigestiveExpression = 0.18, DecomposerExpression = 0.06 },
+                DigestiveExpression = 0.18, DecomposerExpression = 0.0 },
         new RegionGene(
             1, 0, 0, 0, false,
             0.20, 1.10, 0.35, -0.60, 0.72, 0.34, -0.18, 0.72,
@@ -226,7 +236,7 @@ public sealed class Genome
             0.35, 0.25, 0.45, 0.30, 0.25,
             0.78, 0.18, 0.66, 0.24, 0.72) with
             { PhotosyntheticExpression = 0.84, FeedingExpression = 0.08,
-                DigestiveExpression = 0.16, DecomposerExpression = 0.04 },
+                DigestiveExpression = 0.16, DecomposerExpression = 0.0 },
         new RegionGene(
             2, 0, 0, 0, false,
             0.45, 0.70, 0.50, 0.80, 0.48, 0.22, 0.24, 0.80,
@@ -234,7 +244,7 @@ public sealed class Genome
             0.75, 0.35, 0.60, 0.65, 0.65,
             0.48, 0.55, 0.42, 0.72, 0.46) with
             { PhotosyntheticExpression = 0.68, FeedingExpression = 0.12,
-                DigestiveExpression = 0.20, DecomposerExpression = 0.08 }
+                DigestiveExpression = 0.20, DecomposerExpression = 0.0 }
     ],
     mutationRate: 0.28,
     metabolism: MetabolicGene.AquaticAncestor,
@@ -273,6 +283,9 @@ public sealed class Genome
         FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Metabolism.OxygenCatalysis)));
         FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Metabolism.WaterRetention)));
         FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Metabolism.OsmoticTolerance)));
+        FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Metabolism.AnimalFoodAffinity)));
+        FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Metabolism.AttackAffinity)));
+        FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(Metabolism.RetaliationAffinity)));
         foreach (RegionGene region in _regions)
         {
             FingerprintHash.Add(ref hash, unchecked((ulong)region.RegionId));
@@ -324,6 +337,9 @@ public sealed class Genome
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(sensor.DirectionOffsetRadians)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(sensor.Range)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(sensor.DirectionalSelectivity)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(sensor.ApproachWeight)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(sensor.AvoidanceWeight)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(sensor.TargetMemorySeconds)));
         }
 
         FingerprintHash.Add(ref hash, unchecked((ulong)_controllerNodes.Length));
@@ -363,7 +379,10 @@ public static class GenomeValidator
             genome.Metabolism.OxygenUseFraction is < 0.0 or > 1.0 ||
             genome.Metabolism.OxygenCatalysis is < 0.0 or > 1.0 ||
             genome.Metabolism.WaterRetention is < 0.0 or > 1.0 ||
-            genome.Metabolism.OsmoticTolerance is < 0.0 or > 1.0)
+            genome.Metabolism.OsmoticTolerance is < 0.0 or > 1.0 ||
+            genome.Metabolism.AnimalFoodAffinity is < 0.0 or > 1.0 ||
+            genome.Metabolism.AttackAffinity is < 0.0 or > 1.0 ||
+            genome.Metabolism.RetaliationAffinity is < 0.0 or > 1.0)
         {
             throw new InvalidOperationException("Metabolic trade-off genes must be finite within 0-1.");
         }
@@ -399,6 +418,9 @@ public static class GenomeValidator
                 sensor.Gain is < -3.0 or > 3.0 || sensor.ResponseRate is < 0.1 or > 8.0 ||
                 sensor.DirectionOffsetRadians < -Math.PI || sensor.DirectionOffsetRadians > Math.PI ||
                 sensor.Range is < 0.25 or > 12.0 || sensor.DirectionalSelectivity is < 0.0 or > 1.0 ||
+                sensor.ApproachWeight is < -1.0 or > 1.0 ||
+                sensor.AvoidanceWeight is < -1.0 or > 1.0 ||
+                sensor.TargetMemorySeconds is < 0.0 or > 8.0 ||
                 !genome.Regions.Any(region => region.RegionId == sensor.SourceRegionId) ||
                 sensor.TargetControllerNodeIndex < 0 ||
                 sensor.TargetControllerNodeIndex >= genome.ControllerNodes.Count)
@@ -717,7 +739,13 @@ public sealed class GenomeMutator
             RegionGene source = parent.Regions[random.NextInt(parent.Regions.Count)];
             sensors.Add(new SensorGene((SensorChannel)random.NextInt(Enum.GetValues<SensorChannel>().Length), source.RegionId,
                 random.NextInt(parent.ControllerNodes.Count), 0.25 + random.NextUnitDouble(),
-                0.5 + (3.0 * random.NextUnitDouble())));
+                0.5 + (3.0 * random.NextUnitDouble()),
+                DirectionOffsetRadians: -Math.PI + (Math.Tau * random.NextUnitDouble()),
+                Range: 0.25 + (11.75 * random.NextUnitDouble()),
+                DirectionalSelectivity: random.NextUnitDouble(),
+                ApproachWeight: -1.0 + (2.0 * random.NextUnitDouble()),
+                AvoidanceWeight: -1.0 + (2.0 * random.NextUnitDouble()),
+                TargetMemorySeconds: 8.0 * random.NextUnitDouble()));
             summary = "sensor slot 0 added";
             kind = MutationKind.SensorReconnect;
         }
@@ -753,7 +781,7 @@ public sealed class GenomeMutator
         {
             int index = random.NextInt(sensors.Count);
             SensorGene old = sensors[index];
-            int property = random.NextInt(5);
+            int property = random.NextInt(8);
             MutationStep step = SampleScalarStep(random);
             sensors[index] = property switch
             {
@@ -763,8 +791,14 @@ public sealed class GenomeMutator
                 2 => old with { DirectionOffsetRadians = ReflectRange(
                     old.DirectionOffsetRadians + (step.SignedFraction * Math.PI), -Math.PI, Math.PI) },
                 3 => old with { Range = ReflectRange(old.Range * Math.Exp(step.SignedFraction), 0.25, 12.0) },
-                _ => old with { DirectionalSelectivity = ReflectRange(
-                    old.DirectionalSelectivity + step.SignedFraction, 0.0, 1.0) }
+                4 => old with { DirectionalSelectivity = ReflectRange(
+                    old.DirectionalSelectivity + step.SignedFraction, 0.0, 1.0) },
+                5 => old with { ApproachWeight = ReflectRange(
+                    old.ApproachWeight + step.SignedFraction, -1.0, 1.0) },
+                6 => old with { AvoidanceWeight = ReflectRange(
+                    old.AvoidanceWeight + step.SignedFraction, -1.0, 1.0) },
+                _ => old with { TargetMemorySeconds = ReflectRange(
+                    old.TargetMemorySeconds + (2.0 * step.SignedFraction), 0.0, 8.0) }
             };
             summary = $"sensor {index} scalar {property}, {(step.Large ? "rare large" : "small")} inherited step";
             kind = MutationKind.SensorPoint;
@@ -952,7 +986,7 @@ public sealed class GenomeMutator
         MetabolicGene gene,
         DeterministicRandom random)
     {
-        int property = random.NextInt(4);
+        int property = random.NextInt(7);
         MutationStep step = SampleScalarStep(random);
         double delta = step.SignedFraction;
         MetabolicGene changed = property switch
@@ -960,7 +994,10 @@ public sealed class GenomeMutator
             0 => gene with { OxygenUseFraction = ClampUnit(gene.OxygenUseFraction + delta) },
             1 => gene with { OxygenCatalysis = ClampUnit(gene.OxygenCatalysis + delta) },
             2 => gene with { WaterRetention = ClampUnit(gene.WaterRetention + delta) },
-            _ => gene with { OsmoticTolerance = ClampUnit(gene.OsmoticTolerance + delta) }
+            3 => gene with { OsmoticTolerance = ClampUnit(gene.OsmoticTolerance + delta) },
+            4 => gene with { AnimalFoodAffinity = ClampUnit(gene.AnimalFoodAffinity + delta) },
+            5 => gene with { AttackAffinity = ClampUnit(gene.AttackAffinity + delta) },
+            _ => gene with { RetaliationAffinity = ClampUnit(gene.RetaliationAffinity + delta) }
         };
         return (changed, $"metabolic scalar {property}, {(step.Large ? "rare large" : "small")} step {delta:+0.000;-0.000}");
     }

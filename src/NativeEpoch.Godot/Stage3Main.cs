@@ -1,4 +1,4 @@
-using Godot;
+﻿using Godot;
 using NativeEpoch.Simulation;
 using NumericsVector2 = System.Numerics.Vector2;
 
@@ -422,10 +422,24 @@ public sealed partial class Stage3Main : Node3D
                 RecordFunction(organism, "detritus-decomposition", "残骸分解",
                     $"本步处理残骸 {organism.DecompositionLastStep:E2}。",
                     "分解者从有机物获得有限收益，并让部分养分回到无机池。");
+            if (organism.SocialResponse != SocialResponse.None && organism.Velocity.LengthSquared() > 1e-6 &&
+                organism.SensingEnergyLastStep > 1e-10)
+                RecordFunction(organism, "social-" + organism.SocialResponse,
+                    organism.SocialResponse == SocialResponse.Approach ? "个体趋近反应" : "个体回避反应",
+                    $"付费感知与运动同时发生，响应目标 #{organism.SocialTargetId}。",
+                    "响应经过遗传控制连接与身体力学；记录反应不代表必定追上或逃脱。");
+            if (organism.AttackDamageLastStep > 0)
+                RecordFunction(organism, "contact-attack", "接触攻击",
+                    $"本步付费攻击造成损伤 {organism.AttackDamageLastStep:E2}。",
+                    "攻击倾向与食性独立；植食者也能演化出攻击能力。");
+            if (organism.RetaliationDamageLastStep > 0)
+                RecordFunction(organism, "contact-retaliation", "受伤反击",
+                    $"本步遭实际伤害后反击造成损伤 {organism.RetaliationDamageLastStep:E2}。",
+                    "需要遗传反击倾向、真实接触和能量；每步最多一次，不递归触发。");
             if (organism.PredationLastStep > 1e-9)
                 RecordFunction(organism, "contact-predation", "接触捕食",
                     $"本步从接触个体同化有机储备 {organism.PredationLastStep:E2}。",
-                    "需要真实接触、摄食和消化能力；处理耗能，未同化物归还残骸池。");
+                    "需要食肉遗传倾向、真实接触、摄食和消化能力；最多同化20%，攻击与消化另耗能。");
             if (organism.LightEnergyLastStep > 1e-9)
                 RecordFunction(organism, "pigment-photosynthesis", "色素光能利用",
                     $"本步光能转化为化学能 {organism.LightEnergyLastStep:E2}。",
@@ -810,6 +824,7 @@ public sealed partial class Stage3Main : Node3D
             $"能量 {organism.Energy:F3} · 储存物质 {organism.StoredMatter:F3} · 繁殖冷却 {organism.ReproductionCooldownSeconds:F1}s\n" +
             $"探索倾向 {organism.ExplorationDrive:P0} · 食物信号变化 {organism.ForagingTrend:+0.000;-0.000;0.000}\n" +
             $"表达强度 {organism.MeanTissueExpression:F3} · 活跃受体 {organism.ActiveSensorCount}（方向光感 {organism.ActiveVisualSensorCount}）\n" +
+            $"食肉/攻击/反击 {organism.AnimalFoodAffinity:P0}/{organism.AttackAffinity:P0}/{organism.RetaliationAffinity:P0} · 个体受体 {organism.ActiveIndividualSensors} · {(organism.SocialResponse == SocialResponse.Approach ? "趋近" : organism.SocialResponse == SocialResponse.Avoid ? "回避" : organism.SocialResponse == SocialResponse.InjuryAvoidance ? "受伤反应" : "无目标反应")} #{organism.SocialTargetId}\n" +
             $"化学/接触/视觉信号 {organism.ChemicalSensorSignal:F3}/{organism.ContactSensorSignal:F3}/{organism.VisionSignal:F3} · 感知耗能 {organism.SensingEnergyLastStep:E2}\n" +
             $"附肢接地 {organism.AppendageContactCount} · 支撑 {organism.AppendageSupport:P0} · 推进 {organism.AppendageGroundVelocity.Length():F3} · 耗能 {organism.AppendageEnergyLastStep:E2}\n" +
             $"腔氧 {organism.CavityOxygen:F4}/{organism.CavityOxygenCapacity:F4} · 换气/供组织 {organism.CavityVentilationLastStep:E2}/{organism.CavityTissueOxygenLastStep:E2} · 耗能 {organism.CavityEnergyLastStep:E2}\n" +
@@ -834,7 +849,7 @@ public sealed partial class Stage3Main : Node3D
             $"个体 #{organism.Id}    第 {organism.Generation} 代\n\n" +
             $"{(organism.Maturity >= 0.95 ? "已成年" : "正在成长")} · 年龄 {organism.AgeSeconds:F0} 秒\n" +
             $"{(organism.Immersion >= 0.8 ? "水生环境" : organism.Immersion > 0.05 ? "水陆交界" : "陆地环境")} · 深度 {organism.Depth:F1}\n\n" +
-            $"能量  {organism.Energy:F2}\n有机储备  {organism.StoredMatter:F2}\n" +
+            $"能量  {(organism.Energy > 0 && organism.Energy < 0.01 ? organism.Energy.ToString("E2") : organism.Energy.ToString("F2"))}\n有机储备  {organism.StoredMatter:F3}\n组织损伤  {organism.RegionInventories.Average(r => r.Damage):P0}\n" +
             $"身体区域  {organism.Regions.Count}\n" +
             $"{(organism.ParentId == 0 ? "初始祖先" : $"出生突变  {organism.BirthMutationCount} 次")}\n\n" +
             $"{(organism.PredationLastStep > 0 ? "正在捕食" : organism.OrganicFeedingLastStep > 0 ? "正在摄食" : organism.ExplorationDrive > 0.05 ? "探索环境" : "低活动状态")}",

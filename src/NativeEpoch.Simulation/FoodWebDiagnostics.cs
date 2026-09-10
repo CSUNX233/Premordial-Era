@@ -19,8 +19,14 @@ public readonly record struct FoodWebDiagnosticResult(
     double RichFoodFinalReserve,
     bool ExpressionBudgetAndCostsApplied,
     bool PredationExtractsOnlyStoredOrganic,
+    bool CarnivoreAssimilationYieldCapped,
     double MaximumMatterResidual,
-    bool Passed);
+    bool Passed)
+{
+    public bool SustainedMaintenanceFailureIsLethal { get; init; }
+    public bool StarvationIndependentOfBodySize { get; init; }
+    public bool RestoredSupplyStopsStarvationDamage { get; init; }
+}
 
 /// <summary>Short positive and negative checks for composable trophic tissue programs.</summary>
 public static class FoodWebDiagnostics
@@ -51,7 +57,9 @@ public static class FoodWebDiagnostics
             NearZero(RegionalPhysiology.FeedingCapacity(digestOnly,
                 new Genome([TestGene(feed: 0.0, digest: 0.8)], 0.0)));
 
-        Genome consumerGenome = new([TestGene(feed: 0.8, digest: 0.8)], 0.0);
+        Genome consumerGenome = new([TestGene(feed: 0.8, digest: 0.8)], 0.0,
+            MetabolicGene.AquaticAncestor with
+                { AnimalFoodAffinity = 1.0, AttackAffinity = 1.0 });
         DevelopingBody consumer = FullBody(consumerGenome, 2.0);
         OrganicDigestionResult digestion = RegionalPhysiology.DigestOrganicToSubstrate(
             consumer, consumerGenome, 0.10, 1.0);
@@ -115,15 +123,53 @@ public static class FoodWebDiagnostics
         double extracted = prey.ExtractEdibleSubstrate(0.08);
         bool reserveOnly = Near(extracted, 0.08) && Near(prey.Cache.TotalMatter, structuralBefore) &&
             Near(prey.TotalSubstrate, 0.12);
+        DevelopingBody carnivore = FullBody(consumerGenome, 2.0);
+        OrganicDigestionResult carnivoreDigestion = RegionalPhysiology.DigestOrganicToSubstrate(
+            carnivore, consumerGenome, 0.10, 1.0, maximumAssimilationEfficiency: 0.20);
+        bool carnivoreYieldCapped = carnivoreDigestion.ProcessedOrganic > 0.0 &&
+            carnivoreDigestion.AssimilatedSubstrate <=
+                carnivoreDigestion.ProcessedOrganic * 0.20 + 1e-12;
         double maxResidual = Math.Max(organicResidual, detritusResidual);
-        bool passed = mineralCannotFuel && needsMineral && storesOrganic && bothRequired && paidDigestion &&
+        var starvation = VerifyMaintenanceFailure(config);
+        bool passed = starvation.Lethal && starvation.SizeIndependent && starvation.Recovery && mineralCannotFuel && needsMineral && storesOrganic && bothRequired && paidDigestion &&
             zeroEnergy && storedOrganicRestarts && decompositionConserved && noDecomposerBenefit && continuous &&
             richFoodSustains && costs &&
-            reserveOnly && maxResidual <= 1e-12;
+            reserveOnly && carnivoreYieldCapped && maxResidual <= 1e-12;
         return new(mineralCannotFuel, needsMineral, storesOrganic, bothRequired, paidDigestion,
             zeroEnergy, storedOrganicRestarts, decompositionConserved, noDecomposerBenefit,
             continuous, richFoodSustains, fed.Initial, fed.Midpoint, fed.Final, costs, reserveOnly,
-            maxResidual, passed);
+            carnivoreYieldCapped, maxResidual, passed)
+        {
+            SustainedMaintenanceFailureIsLethal = starvation.Lethal,
+            StarvationIndependentOfBodySize = starvation.SizeIndependent,
+            RestoredSupplyStopsStarvationDamage = starvation.Recovery
+        };
+    }
+
+    private static (bool Lethal, bool SizeIndependent, bool Recovery) VerifyMaintenanceFailure(SimulationConfig config)
+    {
+        Genome genome = new([TestGene()], 0.0);
+        FixedEnvironment environment = new(0.0);
+        double mass = BodyCalculator.TargetMatter(genome.Regions[0]);
+        DevelopingBody small = new(genome, mass * 0.01, 0, 0, 0, mass * 0.01);
+        DevelopingBody large = new(genome, mass, 0, 0, 0, mass);
+        DevelopingBody restored = new(genome, mass * 0.1, 0, 0, 0, mass * 0.1);
+        const double dt = 0.1;
+        double recoveryDamage = 0, maximumSizeDifference = 0;
+        for (int step = 0; step < (int)Math.Ceiling(config.MaintenanceFailureSeconds / dt) + 2; step++)
+        {
+            RegionalPhysiology.ReactAndMaintain(small, genome, environment, Vector2.Zero, config, dt);
+            RegionalPhysiology.ReactAndMaintain(large, genome, environment, Vector2.Zero, config, dt);
+            maximumSizeDifference = Math.Max(maximumSizeDifference, Math.Abs(small.AverageDamage - large.AverageDamage));
+            if (step == 100)
+            {
+                recoveryDamage = restored.AverageDamage;
+                restored.ApplyInventoryDelta(genome.Regions[0].RegionId, new RegionalInventoryDelta(0, 0, 0, 5));
+            }
+            RegionalPhysiology.ReactAndMaintain(restored, genome, environment, Vector2.Zero, config, dt);
+        }
+        return (small.AverageDamage >= 1 && large.AverageDamage >= 1,
+            maximumSizeDifference < 1e-10, recoveryDamage > 0 && Math.Abs(restored.AverageDamage - recoveryDamage) < 1e-10);
     }
 
     private static RichFoodTrajectory RichFoodTrajectoryAfter(
