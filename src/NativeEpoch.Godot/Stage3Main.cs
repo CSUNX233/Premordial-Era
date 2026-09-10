@@ -823,6 +823,7 @@ public sealed partial class Stage3Main : Node3D
             $"年龄 {organism.AgeSeconds:F1}s · 成熟 {organism.Maturity:P1} · 发育 {organism.DevelopmentCompletion:P1}\n" +
             $"能量 {organism.Energy:F3} · 储存物质 {organism.StoredMatter:F3} · 繁殖冷却 {organism.ReproductionCooldownSeconds:F1}s\n" +
             $"探索倾向 {organism.ExplorationDrive:P0} · 食物信号变化 {organism.ForagingTrend:+0.000;-0.000;0.000}\n" +
+            $"生理压力 {organism.SurvivalStress:P0} · 避害反射 {(organism.SurvivalReflexActive ? organism.SurvivalReflexMode == SurvivalReflexMode.Retreat ? "沿近期经历回撤" : "试探缓解方向" : "未触发")}\n" +
             $"表达强度 {organism.MeanTissueExpression:F3} · 活跃受体 {organism.ActiveSensorCount}（方向光感 {organism.ActiveVisualSensorCount}）\n" +
             $"食肉/攻击/反击 {organism.AnimalFoodAffinity:P0}/{organism.AttackAffinity:P0}/{organism.RetaliationAffinity:P0} · 个体受体 {organism.ActiveIndividualSensors} · {(organism.SocialResponse == SocialResponse.Approach ? "趋近" : organism.SocialResponse == SocialResponse.Avoid ? "回避" : organism.SocialResponse == SocialResponse.InjuryAvoidance ? "受伤反应" : "无目标反应")} #{organism.SocialTargetId}\n" +
             $"化学感知有效度 {organism.ChemicalSenseAccess:P1} · 化学/接触/视觉信号 {organism.ChemicalSensorSignal:F3}/{organism.ContactSensorSignal:F3}/{organism.VisionSignal:F3} · 感知耗能 {organism.SensingEnergyLastStep:E2}\n" +
@@ -852,7 +853,7 @@ public sealed partial class Stage3Main : Node3D
             $"能量  {(organism.Energy > 0 && organism.Energy < 0.01 ? organism.Energy.ToString("E2") : organism.Energy.ToString("F2"))}\n有机储备  {organism.StoredMatter:F3}\n组织损伤  {organism.RegionInventories.Average(r => r.Damage):P0}\n" +
             $"身体区域  {organism.Regions.Count}\n" +
             $"{(organism.ParentId == 0 ? "初始祖先" : $"出生突变  {organism.BirthMutationCount} 次")}\n\n" +
-            $"{(organism.PredationLastStep > 0 ? "正在捕食" : organism.OrganicFeedingLastStep > 0 ? "正在摄食" : organism.ExplorationDrive > 0.05 ? "探索环境" : "低活动状态")}",
+            $"{(organism.SurvivalReflexActive ? organism.SurvivalReflexMode == SurvivalReflexMode.Retreat ? "正在避害回撤" : "正在寻找缓解方向" : organism.PredationLastStep > 0 ? "正在捕食" : organism.OrganicFeedingLastStep > 0 ? "正在摄食" : organism.ExplorationDrive > 0.05 ? "探索环境" : "低活动状态")}",
             organism.Maturity, organism.Energy / _world.Config.MaximumEnergy);
     }
 

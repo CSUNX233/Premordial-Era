@@ -87,7 +87,7 @@ public sealed class BodyPose
 
     public BodyMechanicsResult Step(Genome genome, DevelopingBody body, ControllerOutputs outputs,
         double ageSeconds, double immersion, double hydration, SimulationConfig config, double dt,
-        bool groundSupported, bool reciprocalDiagnostic)
+        bool groundSupported, bool reciprocalDiagnostic,Vector2? activeSurfaceDirection=null)
     {
         BodyGeometry geometry = body.Geometry;
         if (geometry.Regions.Any(r => !_regions.ContainsKey(r.RegionId)) ||
@@ -175,7 +175,10 @@ public sealed class BodyPose
             double requestedSlip=config.ActiveSurfaceDriveSpeed*Math.Sqrt(_activation[id])*
                 (0.25+(0.75*gene.Permeability))*Math.Sqrt(functional.ExposureFraction)*mediumCoupling;
             Vector2 localAxis=Direction(before.Angle);
-            Vector2 slipDirection=Vector2.Normalize((Vector2.UnitX*0.95f)+(localAxis*0.05f));
+            Vector2 slipDirection=activeSurfaceDirection is Vector2 reflexDirection&&
+                reflexDirection.LengthSquared()>1e-8f
+                ?Vector2.Normalize(reflexDirection)
+                :Vector2.Normalize((Vector2.UnitX*0.95f)+(localAxis*0.05f));
             double turnScale=outputs.LateralContraction*0.80*requestedSlip/
                 Math.Max(0.15,body.Cache.BoundingRadius);
             Vector2 rotational=new(-before.LocalCenter.Y,before.LocalCenter.X);

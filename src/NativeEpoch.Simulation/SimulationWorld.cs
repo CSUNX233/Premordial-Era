@@ -286,6 +286,16 @@ public sealed class SimulationWorld
             organism.ForagingTrend=foraging.ResourceTrend;
             organism.ExplorationDrive=foraging.Activity;
             organism.SteeringDrive=foraging.Steering;
+            organism.Hydration = RegionalPhysiology.BodyHydration(organism.Body, genome);
+            organism.SurvivalStress=SurvivalReflex.MeasureStress(organism,_config,dt);
+            SurvivalReflexResponse survival=_config.SurvivalReflexEnabled
+                ?SurvivalReflex.Update(ref organism.SurvivalMemory,organism.Id,organism.Position,
+                    organism.Depth,organism.HeadingRadians,organism.Velocity,organism.VerticalVelocity,
+                    organism.SurvivalStress,organism.Body.AverageDamage,organism.Hydration,
+                    organism.HypoxiaShortfallLastStep,_config.WorldSize,dt)
+                :new SurvivalReflexResponse(organism.SurvivalStress,false,SurvivalReflexMode.None,0.0,0.0,Vector2.Zero,false);
+            organism.SurvivalReflexActive=survival.Active;
+            organism.SurvivalReflexMode=survival.Mode;
             organism.ControllerInputs = new ControllerInputs(
                 sensing.AmbientLightSignal,
                 sensing.TemperatureSignal,
@@ -306,6 +316,8 @@ public sealed class SimulationWorld
             organism.ControllerState = control.State;
             organism.ControllerOutputs = controllerPaid + 1e-12 >= controllerCost
                 ? ApplySocialDrive(ApplyForagingDrive(control.Outputs,foraging),social) : ControllerOutputs.Basal;
+            if(_config.SurvivalReflexEnabled)
+                organism.ControllerOutputs=SurvivalReflex.Apply(organism.ControllerOutputs,survival);
             CumulativeDissipatedEnergy += controllerPaid;
             organism.Body.UpdateFunctionalState(genome, organism.ControllerOutputs,
                 controllerEnvironment.Light, controllerEnvironment.Pressure, foraging, dt);
@@ -315,7 +327,7 @@ public sealed class SimulationWorld
                 measuredAt = System.Diagnostics.Stopwatch.GetTimestamp();
             }
 
-            MoveOrganism(ref organism, genome, interaction.Acceleration, dt);
+            MoveOrganism(ref organism, genome, interaction.Acceleration, survival, dt);
             StepCavities(ref organism,genome,dt);
             ApplyMediumStress(ref organism, genome, dt);
             if (CollectPerformanceMetrics)
@@ -479,6 +491,8 @@ public sealed class SimulationWorld
                 o.Body.Regions.ToArray())
             {
                 Generation=o.Generation,ExplorationDrive=o.ExplorationDrive,
+                SurvivalStress=o.SurvivalStress,SurvivalReflexActive=o.SurvivalReflexActive,
+                SurvivalReflexMode=o.SurvivalReflexMode,
                 BirthMutationCount=o.BirthMutationCount,
                 LightEnergyLastStep=o.LightEnergyLastStep,
                 HypoxiaShortfallLastStep=o.HypoxiaShortfallLastStep,
@@ -626,6 +640,10 @@ public sealed class SimulationWorld
         organism.Position = position;
         organism.Velocity = Vector2.Zero;
         organism.VerticalVelocity = 0;
+        organism.SurvivalMemory=default;
+        organism.SurvivalStress=0.0;
+        organism.SurvivalReflexActive=false;
+        organism.SurvivalReflexMode=SurvivalReflexMode.None;
         if(headingRadians.HasValue)organism.HeadingRadians=NormalizeAngle(headingRadians.Value);
         organism.Depth = sample.WaterDepth > 0.0
             ? Math.Clamp(depth, 0f, (float)sample.WaterDepth)
@@ -910,7 +928,8 @@ public sealed class SimulationWorld
             VerticalContraction=Math.Clamp(output.VerticalContraction*(0.35+(0.65*foraging.Activity)),-1,1)
         };
 
-    private void MoveOrganism(ref Organism organism, Genome genome, Vector2 separation, double dt)
+    private void MoveOrganism(ref Organism organism, Genome genome, Vector2 separation,
+        SurvivalReflexResponse survival, double dt)
     {
         BodyCache body = organism.Body.Cache;
         OccupancyShape occupancyShape=OccupancyShape.FromBody(organism.Body);
@@ -918,9 +937,17 @@ public sealed class SimulationWorld
         float supportHalfThickness=occupancyShape.VerticalHalfExtent;
         bool groundSupported = HasGroundSupport(
             preMoveEnvironment.WaterDepth, organism.Depth, supportHalfThickness);
+        Vector2? survivalSurfaceDirection=null;
+        if(survival.Active&&survival.PlanarDirection.LengthSquared()>1e-8f)
+        {
+            Vector2 forward=new((float)Math.Cos(organism.HeadingRadians),(float)Math.Sin(organism.HeadingRadians));
+            Vector2 right=new(-forward.Y,forward.X);
+            survivalSurfaceDirection=new Vector2(Vector2.Dot(survival.PlanarDirection,forward),
+                Vector2.Dot(survival.PlanarDirection,right));
+        }
         BodyMechanicsResult mechanics = organism.Pose.Step(genome, organism.Body,
             organism.ControllerOutputs, organism.AgeSeconds, organism.Immersion,
-            organism.Hydration, _config, dt, groundSupported, false);
+            organism.Hydration, _config, dt, groundSupported, false,survivalSurfaceDirection);
         organism.Body.ApplyPoseGeometry(genome, organism.Pose);
         double centerElevation=preMoveEnvironment.WaterDepth>0.0
             ?preMoveEnvironment.WaterSurface-organism.Depth
@@ -1311,9 +1338,13 @@ public sealed class SimulationWorld
             FingerprintHash.Add(ref hash, unchecked((uint)BitConverter.SingleToInt32Bits(o.Velocity.X)));
             FingerprintHash.Add(ref hash, unchecked((uint)BitConverter.SingleToInt32Bits(o.Velocity.Y)));
             FingerprintHash.Add(ref hash, unchecked((uint)BitConverter.SingleToInt32Bits(o.VerticalVelocity)));
+            o.SurvivalMemory.AddFingerprint(ref hash);
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(o.AgeSeconds)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(o.Maturity)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(o.Hydration)));
+            FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(o.SurvivalStress)));
+            FingerprintHash.Add(ref hash,o.SurvivalReflexActive?1UL:0UL);
+            FingerprintHash.Add(ref hash,unchecked((ulong)o.SurvivalReflexMode));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(o.Immersion)));
             FingerprintHash.Add(ref hash, unchecked((ulong)BitConverter.DoubleToInt64Bits(o.HeadingRadians)));
             foreach (BodyRegion r in o.Body.Regions.OrderBy(r => r.RegionId))

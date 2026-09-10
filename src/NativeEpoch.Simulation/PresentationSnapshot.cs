@@ -54,6 +54,9 @@ public readonly record struct OrganismPresentationState(
     public double PrimaryProductionLastStep { get; init; }
     public double PredationLastStep { get; init; }
     public double ExplorationDrive { get; init; }
+    public double SurvivalStress { get; init; }
+    public bool SurvivalReflexActive { get; init; }
+    public SurvivalReflexMode SurvivalReflexMode { get; init; }
     public double ForagingTrend { get; init; }
     public int ContactNeighborCount { get; init; }
     public ulong InteractionOpponentId { get; init; }

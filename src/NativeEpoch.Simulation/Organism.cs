@@ -63,6 +63,10 @@ public struct Organism
     public double ForagingTrend;
     public double ExplorationDrive;
     public double SteeringDrive;
+    public SurvivalReflexMemory SurvivalMemory;
+    public double SurvivalStress;
+    public bool SurvivalReflexActive;
+    public SurvivalReflexMode SurvivalReflexMode;
     public Vector2 LocalActuationForce;
     public double ActuationTorque;
     public double AgeSeconds;
@@ -128,6 +132,8 @@ public struct Organism
         ControllerOutputs.AllFinite &&
         double.IsFinite(ForagingCue) && double.IsFinite(ForagingTrend) &&
         double.IsFinite(ExplorationDrive) && double.IsFinite(SteeringDrive) &&
+        SurvivalMemory.AllFinite && double.IsFinite(SurvivalStress) &&
+        SurvivalStress is >= 0.0 and <= 1.0 && Enum.IsDefined(SurvivalReflexMode) &&
         float.IsFinite(LocalActuationForce.X) && float.IsFinite(LocalActuationForce.Y) &&
         double.IsFinite(ActuationTorque) &&
         double.IsFinite(AgeSeconds) &&

@@ -13,6 +13,7 @@ public sealed record SimulationConfig
     public int? ResourceBudgetReferenceAncestors { get; init; }
     public bool RandomizeFounders { get; init; } = true;
     public CorePrecisionProfile PrecisionProfile { get; init; } = CorePrecisionProfile.Balanced;
+    public bool SurvivalReflexEnabled { get; init; } = true;
 
     public double CoreInitialMatter { get; init; } = 0.25;
     public double AncestorStoredMatter { get; init; } = 1.5;

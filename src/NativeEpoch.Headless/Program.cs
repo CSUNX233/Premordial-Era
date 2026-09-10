@@ -9,6 +9,13 @@ internal static class HeadlessProgram
     {
         try
         {
+            if (args.Contains("--diagnose-survival-reflex"))
+            {
+                SurvivalReflexDiagnosticResult result = SurvivalReflexDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed ? "SURVIVAL REFLEX PASS" : "SURVIVAL REFLEX FAIL");
+                return result.Passed ? 0 : 1;
+            }
             if (args.Contains("--diagnose-shore-causality"))
             {
                 var result = ShoreCausalityDiagnostics.Run();
@@ -55,7 +62,7 @@ internal static class HeadlessProgram
             bool diagnoseWorldPrecision = args.Contains("--diagnose-world-precision");
             bool diagnoseDistribution = args.Contains("--diagnose-mutation-distribution");
             bool diagnoseVerticalMotion = args.Contains("--diagnose-vertical-motion");
-            Options options = Options.Parse(args.Where(a => a != "--diagnose-sphere" && a != "--diagnose-food-web" && a != "--diagnose-land-resources" && a != "--diagnose-sensing-behavior" && a != "--diagnose-photosynthesis" && a != "--diagnose-ecology" && a != "--diagnose-movement" && a != "--diagnose-competition" && a != "--diagnose-tissue" && a != "--diagnose-vision" && a != "--diagnose-appendage" && a != "--diagnose-cavity" && a != "--diagnose-air-respiration" && a != "--diagnose-founders" && a != "--diagnose-precision" && a != "--diagnose-world-precision" && a != "--diagnose-mutation-distribution" && a != "--diagnose-vertical-motion").ToArray());
+            Options options = Options.Parse(args.Where(a => a != "--diagnose-survival-reflex" && a != "--diagnose-sphere" && a != "--diagnose-food-web" && a != "--diagnose-land-resources" && a != "--diagnose-sensing-behavior" && a != "--diagnose-photosynthesis" && a != "--diagnose-ecology" && a != "--diagnose-movement" && a != "--diagnose-competition" && a != "--diagnose-tissue" && a != "--diagnose-vision" && a != "--diagnose-appendage" && a != "--diagnose-cavity" && a != "--diagnose-air-respiration" && a != "--diagnose-founders" && a != "--diagnose-precision" && a != "--diagnose-world-precision" && a != "--diagnose-mutation-distribution" && a != "--diagnose-vertical-motion").ToArray());
             if (options.ShowHelp)
             {
                 PrintHelp();
