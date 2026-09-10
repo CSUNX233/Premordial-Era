@@ -9,6 +9,7 @@ internal static class HeadlessProgram
     {
         try
         {
+            bool diagnoseSphere = args.Contains("--diagnose-sphere");
             bool diagnoseFoodWeb = args.Contains("--diagnose-food-web");
             bool diagnoseLandResources = args.Contains("--diagnose-land-resources");
             bool diagnoseSensingBehavior = args.Contains("--diagnose-sensing-behavior");
@@ -24,13 +25,20 @@ internal static class HeadlessProgram
             bool diagnosePrecision = args.Contains("--diagnose-precision");
             bool diagnoseWorldPrecision = args.Contains("--diagnose-world-precision");
             bool diagnoseDistribution = args.Contains("--diagnose-mutation-distribution");
-            Options options = Options.Parse(args.Where(a => a != "--diagnose-food-web" && a != "--diagnose-land-resources" && a != "--diagnose-sensing-behavior" && a != "--diagnose-photosynthesis" && a != "--diagnose-ecology" && a != "--diagnose-movement" && a != "--diagnose-competition" && a != "--diagnose-tissue" && a != "--diagnose-vision" && a != "--diagnose-appendage" && a != "--diagnose-cavity" && a != "--diagnose-founders" && a != "--diagnose-precision" && a != "--diagnose-world-precision" && a != "--diagnose-mutation-distribution").ToArray());
+            Options options = Options.Parse(args.Where(a => a != "--diagnose-sphere" && a != "--diagnose-food-web" && a != "--diagnose-land-resources" && a != "--diagnose-sensing-behavior" && a != "--diagnose-photosynthesis" && a != "--diagnose-ecology" && a != "--diagnose-movement" && a != "--diagnose-competition" && a != "--diagnose-tissue" && a != "--diagnose-vision" && a != "--diagnose-appendage" && a != "--diagnose-cavity" && a != "--diagnose-founders" && a != "--diagnose-precision" && a != "--diagnose-world-precision" && a != "--diagnose-mutation-distribution").ToArray());
             if (options.ShowHelp)
             {
                 PrintHelp();
                 return 0;
             }
 
+            if (diagnoseSphere)
+            {
+                var result = SphericalWorldDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed ? "SPHERE PASS" : "SPHERE FAIL");
+                return result.Passed ? 0 : 1;
+            }
             if (diagnoseFoodWeb)
             {
                 var environment = FoodWebEnvironmentDiagnostics.Run();
@@ -789,6 +797,7 @@ internal static class HeadlessProgram
         Console.WriteLine("  --diagnose-land-resources check finite inland/coastal/ocean resources and relocation");
         Console.WriteLine("  --diagnose-sensing-behavior check paid chemical/visual steering and receptor loss");
         Console.WriteLine("  --diagnose-photosynthesis check pigment expression, light conversion and costs");
+        Console.WriteLine("  --diagnose-sphere check spherical topology, seeded oceans and conservation");
         Console.WriteLine("  --diagnose-food-web check producers, consumption, decomposition and contact predation");
         Console.WriteLine("  --experiment-adaptation run three bounded natural-lineage paired assays");
         Console.WriteLine("  --experiment-supplement run one fixed finite-resource common-garden supplement");

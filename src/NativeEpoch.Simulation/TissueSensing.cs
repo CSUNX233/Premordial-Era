@@ -58,8 +58,8 @@ public static class TissueSensing
             {
                 double x=geometry.LocalCenter.X*c-geometry.LocalCenter.Y*s;
                 double y=geometry.LocalCenter.X*s+geometry.LocalCenter.Y*c;
-                positions[bodyIndex]=Vector2.Clamp(position+new Vector2((float)x,(float)y),
-                    Vector2.Zero,new Vector2(config.WorldSize));
+                positions[bodyIndex]=SphericalWorld.OffsetPosition(
+                    position,new Vector2((float)x,(float)y),config.WorldSize);
             }
             Vector2 samplePosition=positions[bodyIndex];
             bool needsEnvironment=sensor.Channel is SensorChannel.ChemicalResource or
@@ -163,12 +163,14 @@ public static class TissueSensing
         }
         double baseAngle=localAngle+heading;
         Vector2 direction=new((float)Math.Cos(baseAngle),(float)Math.Sin(baseAngle));
-        Vector2 probe=Vector2.Clamp(source+direction*(float)sensor.Range,Vector2.Zero,new Vector2(config.WorldSize));
+        Vector2 probe=SphericalWorld.OffsetPosition(
+            source,direction*(float)sensor.Range,config.WorldSize);
         double eyeElevation=sourceSample.WaterDepth>0
             ?sourceSample.WaterSurface-depth:sourceSample.TerrainHeight+0.05;
         for(int step=1;step<=3;step++)
         {
-            Vector2 rayPoint=Vector2.Lerp(source,probe,step/4.0f);
+            Vector2 rayPoint=SphericalWorld.OffsetPosition(
+                source,direction*(float)(sensor.Range*step/4.0),config.WorldSize);
             EnvironmentSample raySample=environment.Sample(rayPoint,depth);
             if(raySample.TerrainHeight>eyeElevation+0.015)return 0.0;
         }

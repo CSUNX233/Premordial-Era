@@ -10,6 +10,7 @@ internal sealed class ObservationTerrain
     private readonly int _size;
     private readonly float _worldSize;
     public double WaterSurface { get; }
+    public double MaximumHeight { get; }
 
     public ObservationTerrain(IEnvironmentField environment, SimulationConfig config)
     {
@@ -20,10 +21,12 @@ internal sealed class ObservationTerrain
             _heights[y*_size+x]=environment.Sample(new Vector2(
                 x*_worldSize/(_size-1),y*_worldSize/(_size-1))).TerrainHeight;
         WaterSurface=environment.Sample(Vector2.Zero).WaterSurface;
+        MaximumHeight=_heights.Max();
     }
 
     public double Height(Vector2 position)
     {
+        position=SphericalWorld.FromUnit(SphericalWorld.ToUnit(position,_worldSize),_worldSize);
         double gx=Math.Clamp(position.X/_worldSize,0f,1f)*(_size-1);
         double gy=Math.Clamp(position.Y/_worldSize,0f,1f)*(_size-1);
         int x=Math.Min((int)gx,_size-2),y=Math.Min((int)gy,_size-2);

@@ -17,7 +17,7 @@ public enum HeatmapMode
 
 public sealed partial class LowPolyWorldRenderer : Node3D
 {
-    private const int TerrainSegments = 48;
+    private const int TerrainSegments = 64;
     private const int TerrainChunksPerAxis = 4;
     private const int DetailedRegionBudget = 20_000;
     private const int NearContinuousSkinBudget = 8;
@@ -28,6 +28,8 @@ public sealed partial class LowPolyWorldRenderer : Node3D
     private Node3D _terrainRoot = null!;
     private ResourceFieldRenderer _resourceRenderer = null!;
     private MeshInstance3D _water = null!;
+    private StandardMaterial3D _waterMaterial = null!;
+    private MeshInstance3D _atmosphere = null!;
     private MultiMeshInstance3D _organisms = null!;
     private MeshInstance3D _selection = null!;
     private MeshInstance3D _selectedSkin = null!;
@@ -45,6 +47,7 @@ public sealed partial class LowPolyWorldRenderer : Node3D
     private OrganismPresentationState? _selectedPrevious;
     private OrganismPresentationState? _selectedCurrent;
     private bool _meshCommittedThisFrame;
+    private bool _overviewDetailsHidden;
 
     public override void _Ready()
     {
@@ -112,12 +115,7 @@ public sealed partial class LowPolyWorldRenderer : Node3D
     public void BuildEnvironment(IEnvironmentField environment, float worldSize, HeatmapMode mode)
     {
         _worldSize = worldSize;
-        StandardMaterial3D terrainMaterial = new()
-        {
-            VertexColorUseAsAlbedo = true,
-            Roughness = 0.92f,
-            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded
-        };
+        Material terrainMaterial=CreateTerrainMaterial(mode);
         EnsureTerrainChunks();
         float spacing = worldSize / TerrainSegments;
         int segmentsPerChunk = TerrainSegments / TerrainChunksPerAxis;
@@ -139,33 +137,41 @@ public sealed partial class LowPolyWorldRenderer : Node3D
                         float x1 = (x + 1) * spacing;
                         float z0 = z * spacing;
                         float z1 = (z + 1) * spacing;
-                        AddTerrainTriangle(surface, environment, mode, worldSize, x0, z0, x1, z0, x1, z1);
-                        AddTerrainTriangle(surface, environment, mode, worldSize, x0, z0, x1, z1, x0, z1);
+                        if(z>0)
+                            AddTerrainTriangle(surface, environment, mode, worldSize,
+                                x0,z0,x1,z0,x1,z1);
+                        if(z<TerrainSegments-1)
+                            AddTerrainTriangle(surface, environment, mode, worldSize,
+                                x0,z0,x1,z1,x0,z1);
                     }
                 }
-                surface.GenerateNormals();
                 _terrainChunks[chunkIndex++].Mesh = surface.Commit();
             }
         }
 
-        StandardMaterial3D waterMaterial = new()
+        _waterMaterial=new StandardMaterial3D
         {
-            AlbedoColor = new Color(0.008f, 0.055f, 0.11f, 0.52f),
-            Roughness = 0.18f,
-            Metallic = 0.05f,
-            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
-            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded
+            AlbedoColor=new Color(0.010f,0.075f,0.17f,0.38f),
+            Roughness=0.92f,
+            Metallic=0f,
+            Transparency=BaseMaterial3D.TransparencyEnum.Alpha,
+            CullMode=BaseMaterial3D.CullModeEnum.Back,
+            ShadingMode=BaseMaterial3D.ShadingModeEnum.PerPixel
         };
         _water ??= new MeshInstance3D();
         if (_water.GetParent() is null)
             AddChild(_water);
-        _water.Mesh = new PlaneMesh
+        float planetRadius = PlanetProjection.Radius(worldSize);
+        _water.Mesh = new SphereMesh
         {
-            Size = new Vector2(worldSize, worldSize),
-            Material = waterMaterial
+            Radius = planetRadius,
+            Height = planetRadius * 2f,
+            RadialSegments = 64,
+            Rings = 32,
+            Material = _waterMaterial
         };
         _water.Position = Vector3.Zero;
+        BuildAtmosphere(planetRadius);
     }
 
     public ResourceRenderCounts UpdateResources(EnvironmentResourceSnapshot snapshot,
@@ -178,9 +184,47 @@ public sealed partial class LowPolyWorldRenderer : Node3D
 
     public ResourceRenderCounts ResourceCounts => _resourceRenderer.LastCounts;
 
+    private void BuildAtmosphere(float planetRadius)
+    {
+        _atmosphere ??=new MeshInstance3D
+        {
+            Name="AtmosphereRim",
+            CastShadow=GeometryInstance3D.ShadowCastingSetting.Off
+        };
+        if(_atmosphere.GetParent() is null)AddChild(_atmosphere);
+        Shader shader=new()
+        {
+            Code="""
+                shader_type spatial;
+                render_mode unshaded, cull_front, blend_add, depth_draw_never;
+                void fragment() {
+                    float facing = abs(dot(normalize(NORMAL), normalize(VIEW)));
+                    float rim = pow(clamp(1.0 - facing, 0.0, 1.0), 2.6);
+                    ALBEDO = vec3(0.035, 0.22, 0.31);
+                    EMISSION = vec3(0.025, 0.15, 0.23) * rim;
+                    ALPHA = rim * 0.24;
+                }
+                """
+        };
+        _atmosphere.Mesh=new SphereMesh
+        {
+            Radius=planetRadius+2.2f,
+            Height=(planetRadius+2.2f)*2f,
+            RadialSegments=48,
+            Rings=24,
+            Material=new ShaderMaterial{Shader=shader}
+        };
+    }
+
     public int UpdateOrganisms(WorldPresentationSnapshot snapshot, ulong? selectedId,
         System.Numerics.Vector2? viewCenter = null)
     {
+        UpdateOverviewDetailState();
+        if(_overviewDetailsHidden)
+        {
+            HideOrganismDetails();
+            return 0;
+        }
         bool poseAdvanced = snapshot.Statistics.StepIndex != _lastSnapshotStep;
         _lastSnapshotStep = snapshot.Statistics.StepIndex;
         if (poseAdvanced) _interpolationAlpha = 0f;
@@ -211,17 +255,22 @@ public sealed partial class LowPolyWorldRenderer : Node3D
             if (continuousSkinIds.Contains(organism.Id))
                 continue;
             float centerHeight = OrganismElevation(organism);
+            System.Numerics.Vector2 mapPosition = organism.Position;
+            Basis surfaceBasis = PlanetProjection.BasisAt(mapPosition, _worldSize);
+            Basis bodyBasis = PlanetProjection.HeadingBasis(
+                mapPosition, (float)organism.HeadingRadians, _worldSize);
             bool showDetailed = !UsesSimplifiedProxies || organism.Id == selectedId;
             if (!showDetailed)
             {
                 BodyVisualRegion visual = organism.Regions[0];
                 float diameter = Math.Max(0.55f, (float)organism.Body.BoundingRadius * 2f) * OrganismVisualScale;
                 float height = Math.Max(0.20f, diameter * 0.28f);
-                Vector3 proxyOrigin = new(
-                    organism.Position.X - (_worldSize * 0.5f),
-                    organism.Immersion > 0.05 ? centerHeight : centerHeight + (height * 0.5f),
-                    organism.Position.Y - (_worldSize * 0.5f));
-                Basis proxyBasis = Basis.Identity.Scaled(new Vector3(diameter, height, diameter));
+                float proxyElevation = organism.Immersion > 0.05
+                    ? centerHeight
+                    : centerHeight + (height * 0.5f);
+                Vector3 proxyOrigin = PlanetProjection.MapToWorld(
+                    mapPosition, proxyElevation, _worldSize);
+                Basis proxyBasis = surfaceBasis * Basis.FromScale(new Vector3(diameter, height, diameter));
                 multimesh.SetInstanceTransform(instance, new Transform3D(proxyBasis, proxyOrigin));
                 multimesh.SetInstanceColor(instance, new Color(
                     visual.Color.X, visual.Color.Y, visual.Color.Z, 1.0f));
@@ -233,13 +282,10 @@ public sealed partial class LowPolyWorldRenderer : Node3D
             {
                 float thickness = (float)region.Thickness * OrganismVisualScale;
                 var localPose = RegionPose(organism,region);
-                Basis headingBasis=new(Vector3.Up,-(float)organism.HeadingRadians);
-                Vector3 offset=(headingBasis*localPose.Center)*OrganismVisualScale;
-                Vector3 origin = new(
-                    organism.Position.X - (_worldSize * 0.5f) + offset.X,
-                    centerHeight+offset.Y,
-                    organism.Position.Y - (_worldSize * 0.5f) + offset.Z);
-                Basis basis = (headingBasis*new Basis(localPose.Rotation))*Basis.FromScale(new Vector3(
+                Vector3 offset=(bodyBasis*localPose.Center)*OrganismVisualScale;
+                Vector3 origin = PlanetProjection.MapToWorld(
+                    mapPosition, centerHeight, _worldSize) + offset;
+                Basis basis = (bodyBasis*new Basis(localPose.Rotation))*Basis.FromScale(new Vector3(
                     (localPose.Length+(float)region.Width) * OrganismVisualScale,
                     thickness,
                     (float)region.Width * OrganismVisualScale));
@@ -264,6 +310,41 @@ public sealed partial class LowPolyWorldRenderer : Node3D
     public long SkinMeshesBuilt { get; private set; }
     public int VisibleOrganismCount { get; private set; }
 
+    private void UpdateOverviewDetailState()
+    {
+        Camera3D? camera=GetViewport().GetCamera3D();
+        if(camera is null||_worldSize<=0f)
+        {
+            _overviewDetailsHidden=false;
+            return;
+        }
+        float ratio=camera.GlobalPosition.Length()/PlanetProjection.Radius(_worldSize);
+        // Distant water obscures the seabed; nearby water stays translucent.
+        float waterOverview = Mathf.SmoothStep(1.25f, 2.50f, ratio);
+        _waterMaterial.AlbedoColor = new Color(0.010f, 0.075f, 0.17f, 0.38f)
+            .Lerp(new Color(0.018f, 0.16f, 0.32f, 0.90f), waterOverview);
+        if(_overviewDetailsHidden)
+            _overviewDetailsHidden=ratio>2.30f;
+        else
+            _overviewDetailsHidden=ratio>=2.60f;
+    }
+
+    private void HideOrganismDetails()
+    {
+        _organisms.Multimesh.InstanceCount=0;
+        _selection.Visible=false;
+        _selectedSkin.Visible=false;
+        _selectedSkeleton.Visible=false;
+        foreach(NearSkinView view in _nearSkins)
+        {
+            view.Skeleton.Visible=false;
+            view.Mesh.Visible=false;
+        }
+        _previousVisibleIds.Clear();
+        _previousNearIds.Clear();
+        VisibleOrganismCount=0;
+    }
+
     private HashSet<ulong> UpdateNearSkins(IReadOnlyList<OrganismPresentationState> visibleOrganisms, ulong? selectedId,
         System.Numerics.Vector2? viewCenter, bool poseAdvanced,bool selectedSkinReady)
     {
@@ -271,7 +352,7 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         int viewIndex = 0;
         System.Numerics.Vector2 focus=viewCenter??new(_worldSize*0.5f,_worldSize*0.5f);
         foreach (OrganismPresentationState organism in visibleOrganisms.Where(o=>o.Id!=selectedId)
-                     .OrderBy(o=>System.Numerics.Vector2.DistanceSquared(o.Position,focus)*
+                     .OrderBy(o=>SurfaceDistanceSquared(o.Position,focus,_worldSize)*
                          (_previousNearIds.Contains(o.Id)?0.85f:1f)).Take(NearContinuousSkinBudget))
         {
             if(!TryGetSkinTemplate(organism,"世界近景个体",out SkinTemplate? template))continue;
@@ -322,15 +403,16 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         HashSet<ulong> nextVisible = [];
         foreach (OrganismPresentationState organism in snapshot.Organisms)
         {
-            Vector3 worldPosition = new(
-                organism.Position.X - (_worldSize * 0.5f), OrganismElevation(organism),
-                organism.Position.Y - (_worldSize * 0.5f));
+            Vector3 worldPosition = PlanetProjection.MapToWorld(
+                organism.Position, OrganismElevation(organism), _worldSize);
             bool selected = selectedId == organism.Id;
-            bool inFront = !camera.IsPositionBehind(worldPosition);
+            bool inFront = !camera.IsPositionBehind(worldPosition) &&
+                PlanetProjection.IsSurfaceVisible(
+                    organism.Position, camera.GlobalPosition, _worldSize, 0.06f);
             bool retained = _previousVisibleIds.Contains(organism.Id);
             bool inGuard = inFront && (retained ? retainedGuard : guard)
                 .HasPoint(camera.UnprojectPosition(worldPosition));
-            if (!selected && !inGuard)
+            if(!inFront||(!selected&&!inGuard))
                 continue;
             visible.Add(organism);
             nextVisible.Add(organism.Id);
@@ -383,13 +465,14 @@ public sealed partial class LowPolyWorldRenderer : Node3D
                 (float)(thickness/Math.Max(1e-8,(rest.StartRadius+rest.EndRadius)*rest.VerticalScale)),
                 (float)(width/Math.Max(1e-8,rest.StartRadius+rest.EndRadius))));
         }
-        float worldX=Mathf.Lerp(previous.Position.X,current.Position.X,alpha)-(_worldSize*0.5f);
-        float worldZ=Mathf.Lerp(previous.Position.Y,current.Position.Y,alpha)-(_worldSize*0.5f);
+        System.Numerics.Vector2 mapPosition=PlanetProjection.InterpolateMapPosition(
+            previous.Position,current.Position,alpha,_worldSize);
         float elevation=Mathf.Lerp(OrganismElevation(previous),OrganismElevation(current),alpha);
         double heading=previous.HeadingRadians+
             NormalizeAngle(current.HeadingRadians-previous.HeadingRadians)*alpha;
-        skeleton.Position=new Vector3(worldX,elevation,worldZ);
-        skeleton.Rotation=new Vector3(0,-(float)heading,0);
+        Basis bodyBasis=PlanetProjection.HeadingBasis(mapPosition,(float)heading,_worldSize);
+        skeleton.Transform=new Transform3D(bodyBasis,
+            PlanetProjection.MapToWorld(mapPosition,elevation,_worldSize));
     }
 
     private static bool TryFindRegion(IReadOnlyList<BodyVisualRegion> regions,int regionId,
@@ -440,6 +523,14 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         while(angle>Math.PI)angle-=Math.Tau;
         while(angle<-Math.PI)angle+=Math.Tau;
         return angle;
+    }
+
+    private static float SurfaceDistanceSquared(System.Numerics.Vector2 a,
+        System.Numerics.Vector2 b,float worldSize)
+    {
+        float chord=PlanetProjection.UnitNormal(a,worldSize).DistanceTo(
+            PlanetProjection.UnitNormal(b,worldSize))*PlanetProjection.Radius(worldSize);
+        return chord*chord;
     }
 
     private sealed class NearSkinView(Skeleton3D skeleton,MeshInstance3D mesh)
@@ -494,6 +585,12 @@ public sealed partial class LowPolyWorldRenderer : Node3D
             return false;
         }
         OrganismPresentationState organism = found.Value;
+        if(!IsPlanetFacingCamera(organism.Position,OrganismElevation(organism)))
+        {
+            _selectedSkin.Visible=false;
+            _selectedSkeleton.Visible=false;
+            return false;
+        }
         ulong geometryKey = organism.VisualTemplateGeometry.GeometryKey;
         if (geometryKey != _selectedSkinKey)
         {
@@ -559,12 +656,18 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         }
 
         OrganismPresentationState organism = selected.Value;
+        if(!IsPlanetFacingCamera(organism.Position,OrganismElevation(organism)))
+        {
+            _selection.Visible=false;
+            return;
+        }
         float radius = Math.Max(0.75f, (float)organism.Body.BoundingRadius * OrganismVisualScale * 1.45f);
-        _selection.Position = new Vector3(
-            organism.Position.X - (_worldSize * 0.5f),
-            OrganismElevation(organism) + Math.Max(0.08f, (float)organism.Body.BoundingRadius * 0.16f),
-            organism.Position.Y - (_worldSize * 0.5f));
-        _selection.Scale = new Vector3(radius, 1f, radius);
+        float elevation=OrganismElevation(organism)+
+            Math.Max(0.08f,(float)organism.Body.BoundingRadius*0.16f);
+        Basis tangent=PlanetProjection.BasisAt(organism.Position,_worldSize)*
+            Basis.FromScale(new Vector3(radius,1f,radius));
+        _selection.Transform=new Transform3D(tangent,
+            PlanetProjection.MapToWorld(organism.Position,elevation,_worldSize));
         _selection.Visible = true;
     }
 
@@ -595,10 +698,28 @@ public sealed partial class LowPolyWorldRenderer : Node3D
     {
         EnvironmentSample sample = environment.Sample(new System.Numerics.Vector2(x, z));
         surface.SetColor(ColorFor(sample, mode));
-        surface.AddVertex(new Vector3(
-            x - (worldSize * 0.5f),
-            (float)sample.TerrainHeight,
-            z - (worldSize * 0.5f)));
+        surface.SetNormal(PlanetProjection.UnitNormal(
+            new System.Numerics.Vector2(x,z),worldSize));
+        surface.AddVertex(PlanetProjection.MapToWorld(
+            new System.Numerics.Vector2(x, z), (float)sample.TerrainHeight, worldSize));
+    }
+
+    private static Material CreateTerrainMaterial(HeatmapMode mode)
+    {
+        if(mode!=HeatmapMode.Natural)
+            return new StandardMaterial3D
+            {
+                VertexColorUseAsAlbedo=true,
+                Roughness=0.94f,
+                ShadingMode=BaseMaterial3D.ShadingModeEnum.Unshaded
+            };
+        return new StandardMaterial3D
+        {
+            VertexColorUseAsAlbedo=true,
+            Roughness=0.94f,
+            Metallic=0f,
+            ShadingMode=BaseMaterial3D.ShadingModeEnum.PerPixel
+        };
     }
 
     private static Color ColorFor(EnvironmentSample sample, HeatmapMode mode)
@@ -620,12 +741,17 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         if (sample.TerrainHeight < 0.0)
         {
             float depth = Normalize(-sample.TerrainHeight, 0.0, 100.0);
-            return new Color(0.008f + (0.018f * (1f - depth)),
-                0.022f + (0.060f * (1f - depth)), 0.045f + (0.105f * (1f - depth)));
+            float shelf=MathF.Pow(1f-depth,0.62f);
+            return new Color(0.010f+(0.055f*shelf),
+                0.035f+(0.150f*shelf),0.075f+(0.115f*shelf));
         }
 
-        float height = Normalize(sample.TerrainHeight, 0.0, 8.0);
-        return new Color(0.035f + (0.055f * height), 0.085f + (0.075f * height), 0.022f + (0.035f * height));
+        float shore=Normalize(sample.TerrainHeight,0.0,1.4);
+        Color sand=new(0.24f,0.18f,0.075f);
+        Color grass=new(0.055f,0.18f,0.050f);
+        Color baseColor=sand.Lerp(grass,shore);
+        float highland=Normalize(sample.TerrainHeight,4.5,8.0);
+        return baseColor.Lerp(new Color(0.16f,0.17f,0.13f),highland);
     }
 
     private static Color HeatColor(float value)
@@ -645,6 +771,15 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         organism.Environment.WaterDepth > 0.0 && organism.Immersion > 0.05
             ? (float)(organism.Environment.WaterSurface - organism.Depth)
             : (float)organism.Environment.TerrainHeight + 0.12f;
+
+    private bool IsPlanetFacingCamera(System.Numerics.Vector2 mapPosition,float elevation)
+    {
+        Camera3D? camera=GetViewport().GetCamera3D();
+        if(camera is null)return true;
+        Vector3 point=PlanetProjection.MapToWorld(mapPosition,elevation,_worldSize);
+        return !camera.IsPositionBehind(point)&&
+            PlanetProjection.IsSurfaceVisible(mapPosition,camera.GlobalPosition,_worldSize,0.06f);
+    }
 
     private void EnsureTerrainChunks()
     {

@@ -275,7 +275,8 @@ public sealed class AppendageMechanics
         foreach (AppendageRegionPose foot in _feet)
         {
             Vector2 localPlanar = new(foot.LocalEnd.X, foot.LocalEnd.Z);
-            Vector2 footWorld = worldPosition + Rotate(localPlanar, headingRadians);
+            Vector2 footWorld = SphericalWorld.OffsetPosition(
+                worldPosition, Rotate(localPlanar, headingRadians), config.WorldSize);
             EnvironmentSample sample = environment.Sample(footWorld);
             double tipElevation = bodyCenterElevation + foot.LocalEnd.Y;
             BodyPoseRegion sourcePose = _planar[foot.RegionId];

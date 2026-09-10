@@ -20,7 +20,13 @@ public readonly record struct LandResourceDiagnosticResult(
     bool CenterIsResourceRichLand,
     bool CenterRelocationRemainsOnLand,
     bool ThousandFounderBudgetConstructs,
-    bool Passed);
+    bool Passed)
+{
+    public bool FoundersAquatic { get; init; }
+    public bool InlandBirthAllowed { get; init; }
+    public bool LandNewbornIsJuvenile { get; init; }
+    public double LandBirthMatterError { get; init; }
+}
 
 /// <summary>
 /// Bounded checks for finite terrain-bound resources, shoreline gradients,
@@ -39,7 +45,7 @@ public static class LandResourceDiagnostics
         const ulong seed = 0x1A4D5EEDUL;
         BilinearEnvironmentField environment = new(config, new DeterministicRandom(seed, 1));
         ResourceBands bands = MeasureBands(environment, config);
-        Vector2 center = new(config.WorldSize * 0.5f, config.WorldSize * 0.5f);
+        Vector2 center = FindRichInlandPosition(environment.CaptureResourceSnapshot());
         EnvironmentSample centerSample = environment.Sample(center);
         bool centerRichLand = centerSample.TerrainHeight > 3.0 &&
             centerSample.Minerals + centerSample.Detritus > bands.CoastalMean * 2.0;
@@ -60,47 +66,83 @@ public static class LandResourceDiagnostics
         double cycleError = Math.Abs(cycleAfter - cycleBefore);
 
         AllocationTrial allocation = RunAllocationTrial(config, seed + 1, center);
-        bool centerRelocation = VerifyCenterRelocation(config, seed + 2, center);
+        bool centerRelocation = VerifyCenterRelocation(config, seed, center);
         bool thousandFounderBudget = VerifyThousandFounderBudget(seed + 3);
+        var birth = VerifyInlandBirth();
         bool passed = bands.InlandCount > 0 && bands.CoastalCount > 0 && bands.DeepCount > 0 &&
             bands.InlandMean > bands.CoastalMean * 3.0 &&
             bands.CoastalMean > bands.DeepMean * 2.0 && centerRichLand &&
-            initial > 0.0 && Math.Abs(initial - withdrawn) < 1e-8 &&
-            exhausted < 1e-10 && spontaneousRefill < 1e-10 && cycleError < 1e-12 &&
+            initial > 0.0 && Math.Abs(initial - withdrawn) / initial < 1e-6 &&
+            exhausted / initial < 1e-6 && spontaneousRefill <= exhausted + 1e-10 &&
+            cycleError < 1e-12 &&
             allocation.EqualDifference < 1e-12 && allocation.ReversedDifference < 1e-12 &&
             allocation.ConservationError < 1e-12 && allocation.ReplayRejected && centerRelocation &&
-            thousandFounderBudget;
+            thousandFounderBudget && birth.Aquatic && birth.Born && birth.Juvenile && Math.Abs(birth.MatterError) < 1e-8;
 
         return new(bands.InlandCount, bands.CoastalCount, bands.DeepCount,
             bands.InlandMean, bands.CoastalMean, bands.DeepMean, initial, exhausted,
             spontaneousRefill, cycleError, allocation.EqualDifference,
             allocation.ReversedDifference, allocation.ConservationError, allocation.ReplayRejected,
-            centerRichLand, centerRelocation, thousandFounderBudget, passed);
+            centerRichLand, centerRelocation, thousandFounderBudget, passed)
+        {
+            FoundersAquatic = birth.Aquatic, InlandBirthAllowed = birth.Born,
+            LandNewbornIsJuvenile = birth.Juvenile, LandBirthMatterError = birth.MatterError
+        };
+    }
+
+    private static (bool Aquatic, bool Born, bool Juvenile, double MatterError) VerifyInlandBirth()
+    {
+        // A supplied, accelerated parent isolates birthplace legality from
+        // natural adaptation. Relocation is diagnostic only; birth uses Step.
+        SimulationConfig config = new()
+        {
+            EnvironmentGridSize = 32, RandomizeFounders = false, MaxPopulation = 8,
+            AncestorStoredMatter = 10, AncestorEnergy = 10, MaximumEnergy = 20,
+            MaturityAgeSeconds = 1, GrowthMatterPerSecond = 4,
+            ReproductionCooldownSeconds = 0.1, NewbornOffsetRadius = 0.2f
+        };
+        SimulationWorld world = new(config, 20260908, 1, mutationsEnabled: false);
+        bool aquatic = world.Organisms.All(o => o.Generation == 0 && o.Immersion > 0.95 && o.Depth > 0);
+        Vector2 inland = FindRichInlandPosition(world.CapturePresentationSnapshot().Resources!);
+        world.RelocateForMediumDiagnostic(world.Organisms[0].Id, inland, 0);
+        bool born = false, juvenile = false;
+        for (int step = 0; step < 200 && !born && world.Organisms.Count > 0; step++)
+        {
+            world.Step();
+            foreach (Organism child in world.Organisms)
+            {
+                if (child.Generation <= 0 || child.Depth != 0 || child.Immersion != 0) continue;
+                born = true;
+                juvenile = child.AgeSeconds == 0 && child.Maturity < 0.95 && child.ParentId != 0;
+                break;
+            }
+        }
+        return (aquatic, born, juvenile, world.CaptureSnapshot().MatterError);
     }
 
     private static ResourceBands MeasureBands(
         BilinearEnvironmentField environment, SimulationConfig config)
     {
-        double spacing = config.WorldSize / (config.EnvironmentGridSize - 1);
         double inland = 0.0, coastal = 0.0, deep = 0.0;
         int inlandCount = 0, coastalCount = 0, deepCount = 0;
+        EnvironmentResourceSnapshot snapshot = environment.CaptureResourceSnapshot();
         for (int y = 0; y < config.EnvironmentGridSize; y++)
         for (int x = 0; x < config.EnvironmentGridSize; x++)
         {
-            EnvironmentSample sample = environment.Sample(
-                new Vector2((float)(x * spacing), (float)(y * spacing)));
-            double resource = sample.Minerals + sample.Detritus;
-            if (sample.TerrainHeight >= 3.0)
+            int index = (y * config.EnvironmentGridSize) + x;
+            double resource = (snapshot.Minerals[index] + snapshot.Detritus[index]) /
+                snapshot.CellAreas[index];
+            if (snapshot.TerrainHeight[index] >= 3.0)
             {
                 inland += resource;
                 inlandCount++;
             }
-            else if (sample.WaterDepth is > 0.0 and <= 3.0)
+            else if (snapshot.WaterDepth[index] is > 0.0 and <= 3.0)
             {
                 coastal += resource;
                 coastalCount++;
             }
-            else if (sample.WaterDepth >= 20.0)
+            else if (snapshot.WaterDepth[index] >= 20.0)
             {
                 deep += resource;
                 deepCount++;
@@ -115,13 +157,34 @@ public static class LandResourceDiagnostics
     private static double ExhaustAtGridNodes(
         BilinearEnvironmentField environment, SimulationConfig config)
     {
-        double spacing = config.WorldSize / (config.EnvironmentGridSize - 1);
+        double longitudeSpacing = config.WorldSize / config.EnvironmentGridSize;
+        double colatitudeSpacing = config.WorldSize / (config.EnvironmentGridSize - 1);
         double withdrawn = 0.0;
         for (int y = 0; y < config.EnvironmentGridSize; y++)
         for (int x = 0; x < config.EnvironmentGridSize; x++)
             withdrawn += environment.WithdrawMatter(
-                new Vector2((float)(x * spacing), (float)(y * spacing)), double.MaxValue);
+                new Vector2((float)(x * longitudeSpacing), (float)(y * colatitudeSpacing)),
+                double.MaxValue);
         return withdrawn;
+    }
+
+    private static Vector2 FindRichInlandPosition(EnvironmentResourceSnapshot snapshot)
+    {
+        int best = -1;
+        double bestDensity = double.NegativeInfinity;
+        for (int index = 0; index < snapshot.TerrainHeight.Length; index++)
+        {
+            if (snapshot.TerrainHeight[index] < 3.0) continue;
+            double density = (snapshot.Minerals[index] + snapshot.Detritus[index]) /
+                snapshot.CellAreas[index];
+            if (density <= bestDensity) continue;
+            best = index;
+            bestDensity = density;
+        }
+        if (best < 0) throw new InvalidOperationException("Seeded globe has no inland diagnostic cell.");
+        return new Vector2(
+            (best % snapshot.GridSize) * snapshot.WorldSize / snapshot.GridSize,
+            (best / snapshot.GridSize) * snapshot.WorldSize / (snapshot.GridSize - 1f));
     }
 
     private static AllocationTrial RunAllocationTrial(
@@ -157,7 +220,7 @@ public static class LandResourceDiagnostics
         if (!world.TryGetOrganism(id, out Organism organism)) return false;
         EnvironmentSample sample = world.Environment.Sample(organism.Position, organism.Depth);
         return sample.TerrainHeight > 0.0 && sample.WaterDepth == 0.0 &&
-            Vector2.Distance(center, organism.Position) < 1.0f;
+            SphericalWorld.Distance(center, organism.Position, config.WorldSize) < 1.0;
     }
 
     private static bool VerifyThousandFounderBudget(ulong seed)

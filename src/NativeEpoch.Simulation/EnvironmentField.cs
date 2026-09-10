@@ -67,6 +67,7 @@ public interface IMutableEnvironmentField : IEnvironmentField
     double TotalEdibleOrganics => 0.0;
     double TotalOrganicMatter => TotalVegetation + TotalEdibleOrganics + TotalDetritus + TotalMetabolicWaste;
     double TotalEnvironmentMatter => TotalMinerals + TotalOrganicMatter;
+    double OceanAreaFraction => 0.0;
     double TotalOxygen { get; }
     double CumulativeExternalOxygenSupply { get; }
     bool AllFinite { get; }
@@ -86,6 +87,8 @@ public sealed record EnvironmentResourceSnapshot(
     double[] Detritus,
     double[] MetabolicWaste)
 {
+    public double[] CellAreas { get; init; } = [];
+    public double OceanAreaFraction { get; init; }
     public static EnvironmentResourceSnapshot Empty { get; } = new(
         0, 0f, 0.0, [], [], [], [], [], [], [], []);
 }
@@ -205,6 +208,8 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
     private readonly double[] _terrain;
     private readonly double[] _temperature;
     private readonly double[] _light;
+    private readonly double[] _cellAreas;
+    private readonly double[] _habitatVariation;
     private readonly double[] _minerals;
     private readonly double[] _landPlants;
     private readonly double[] _algae;
@@ -227,7 +232,8 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
     private readonly Dictionary<ulong, OrganicReservation> _activeOrganicReservations = [];
     private readonly Dictionary<ulong, DetritusReservation> _activeDetritusReservations = [];
     private readonly double _wasteRemineralizationPerSecond;
-    private readonly double _lightEnergyFluxPerCell;
+    private readonly double _lightEnergyFluxPerWorldAreaPerSecond;
+    private readonly double _referenceCellArea;
     private double _producerDispersalAccumulator;
     private int _producerDispersalDirection;
 
@@ -236,12 +242,14 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         _gridSize = config.EnvironmentGridSize;
         _worldSize = config.WorldSize;
         _wasteRemineralizationPerSecond = config.WasteRemineralizationPerSecond;
-        double cellLength = config.WorldSize / (config.EnvironmentGridSize - 1);
-        _lightEnergyFluxPerCell = config.SurfaceLightEnergyPerWorldAreaPerSecond * cellLength * cellLength;
+        _lightEnergyFluxPerWorldAreaPerSecond = config.SurfaceLightEnergyPerWorldAreaPerSecond;
+        _referenceCellArea = Math.Pow(config.WorldSize / (config.EnvironmentGridSize - 1), 2.0);
         int count = checked(_gridSize * _gridSize);
         _terrain = new double[count];
         _temperature = new double[count];
         _light = new double[count];
+        _cellAreas = new double[count];
+        _habitatVariation = new double[count];
         _minerals = new double[count];
         _landPlants = new double[count];
         _algae = new double[count];
@@ -260,25 +268,57 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         _producerLightClaim = new double[count];
         _producerDispersalDelta = new double[count];
 
+        double targetOceanAreaFraction = 0.70 + (0.10 * random.NextUnitDouble());
+        Span<Vector3> noiseDirections = stackalloc Vector3[6];
+        Span<double> noisePhases = stackalloc double[6];
+        ReadOnlySpan<double> noiseFrequencies = [1.15, 1.85, 2.7, 3.9, 5.4, 7.2];
+        ReadOnlySpan<double> noiseWeights = [0.34, 0.24, 0.17, 0.12, 0.08, 0.05];
+        for (int term = 0; term < noiseDirections.Length; term++)
+        {
+            double z = (random.NextUnitDouble() * 2.0) - 1.0;
+            double angle = random.NextUnitDouble() * Math.Tau;
+            double radial = Math.Sqrt(Math.Max(0.0, 1.0 - (z * z)));
+            noiseDirections[term] = new Vector3(
+                (float)(radial * Math.Cos(angle)), (float)z, (float)(radial * Math.Sin(angle)));
+            noisePhases[term] = random.NextUnitDouble() * Math.Tau;
+        }
+        double radius = SphericalWorld.Radius(_worldSize);
+        double thetaStep = Math.PI / (_gridSize - 1);
+        double longitudeStep = Math.Tau / _gridSize;
+
         for (int y = 0; y < _gridSize; y++)
         {
             double normalizedY = y / (double)(_gridSize - 1);
+            double theta = normalizedY * Math.PI;
+            double northEdge = Math.Max(0.0, theta - (thetaStep * 0.5));
+            double southEdge = Math.Min(Math.PI, theta + (thetaStep * 0.5));
+            double cellArea = radius * radius * longitudeStep *
+                (Math.Cos(northEdge) - Math.Cos(southEdge));
             for (int x = 0; x < _gridSize; x++)
             {
-                double normalizedX = x / (double)(_gridSize - 1);
-                double centerX = (normalizedX * 2.0) - 1.0;
-                double centerY = (normalizedY * 2.0) - 1.0;
-                double radial = Math.Sqrt((centerX * centerX) + (centerY * centerY));
-                double variation = random.NextUnitDouble();
+                double normalizedX = x / (double)_gridSize;
                 int index = Index(x, y);
+                Vector2 mapPosition = new(
+                    (float)(normalizedX * _worldSize), (float)(normalizedY * _worldSize));
+                Vector3 unit = SphericalWorld.ToUnit(mapPosition, _worldSize);
+                double broadNoise = SphericalNoise(
+                    unit, noiseDirections, noisePhases, noiseFrequencies, noiseWeights);
+                double detailNoise = 0.5 + (0.5 * Math.Sin(
+                    10.7 * Vector3.Dot(unit, noiseDirections[5]) + noisePhases[4]));
+                double variation = Math.Clamp(0.5 + (0.36 * broadNoise) +
+                    (0.14 * (detailNoise - 0.5)), 0.0, 1.0);
+                _habitatVariation[index] = variation;
+                double areaScale = cellArea / _referenceCellArea;
+                _cellAreas[index] = cellArea;
 
-                // Continuous shelf-to-basin profile: readable 0-6 shallows, a broad
-                // continental slope, then deep ocean. This is also the simulation height.
-                _terrain[index] = 8.0 - (62.0 * Math.Pow(radial, 1.6)) +
-                    ((variation - 0.5) * (1.2 + (1.3 * radial))) +
-                    config.TerrainElevationOffset;
-                _temperature[index] = 0.45 + (0.45 * (1.0 - Math.Abs(centerY))) + (variation * 0.05);
-                _light[index] = 0.50 + (0.35 * (1.0 - normalizedY)) + (variation * 0.10);
+                // Low-frequency noise is evaluated in 3D direction space. Therefore
+                // longitude wraps exactly and every representation of a pole agrees.
+                double terrain = -7.0 + (35.0 * broadNoise) +
+                    (4.0 * ((detailNoise * 2.0) - 1.0)) + config.TerrainElevationOffset;
+                _terrain[index] = Math.Clamp(terrain, -0.85 * radius, 0.35 * radius);
+                double equatorialWarmth = Math.Sin(theta);
+                _temperature[index] = 0.42 + (0.46 * equatorialWarmth) + (variation * 0.05);
+                _light[index] = 0.46 + (0.38 * equatorialWarmth) + (variation * 0.08);
                 // Finite terrain-bound stores. Deep water starts nutrient-poor,
                 // the shelf provides a readable approach gradient, and inland
                 // terrain contains substantially richer mineral and old organic
@@ -286,24 +326,27 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
                 double inland = SmoothStep(-1.5, 6.0, _terrain[index]);
                 double coast = Math.Exp(-Math.Abs(_terrain[index]) / 3.5);
                 double oceanFloor = 0.020 + (variation * 0.035);
-                _minerals[index] = config.InitialMineralScale *
+                _minerals[index] = config.InitialMineralScale * areaScale *
                     (oceanFloor + (0.11 * coast) + (2.10 * inland));
-                _detritus[index] = config.InitialMineralScale *
+                _detritus[index] = config.InitialMineralScale * areaScale *
                     ((0.018 * coast) + (0.16 * inland * (0.75 + (0.25 * variation))));
                 _metabolicWaste[index] = 0.0;
-                _moisture[index] = Math.Clamp(1.15 - radial, 0.15, 1.0);
+                _moisture[index] = Math.Clamp(
+                    0.24 + (0.60 * equatorialWarmth) + (0.20 * broadNoise), 0.08, 1.0);
                 _flow[index] = new Vector2(
-                    (float)(-centerY * (0.06 + (0.08 * variation))),
-                    (float)(centerX * (0.06 + (0.08 * variation))));
+                    (float)(equatorialWarmth * (0.055 + (0.075 * variation))),
+                    (float)(equatorialWarmth * 0.035 *
+                        Math.Sin((normalizedX * Math.Tau * 2.0) + noisePhases[0])));
 
-                _airOxygenCapacity[index] = 4.0;
+                _airOxygenCapacity[index] = 4.0 * areaScale;
                 double airAvailability = Math.Clamp(0.30 + ((variation - 0.5) * 0.08), 0.22, 0.38);
                 _airOxygen[index] = _airOxygenCapacity[index] * airAvailability;
                 _airOxygenEquilibrium[index] = _airOxygen[index];
                 double waterDepth = Math.Max(0.0, -_terrain[index]);
                 if (waterDepth > 0.0)
                 {
-                    _dissolvedOxygenCapacity[index] = 0.85 + (0.025 * waterDepth);
+                    _dissolvedOxygenCapacity[index] =
+                        (0.85 + (0.025 * waterDepth)) * areaScale;
                     double mixing = Math.Clamp(_flow[index].Length() * 4.0, 0.0, 0.55);
                     double dissolvedAvailability = Math.Clamp(
                         0.18 + (0.16 * mixing) + ((variation - 0.5) * 0.05),
@@ -315,6 +358,10 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
 
             }
         }
+        if (Math.Abs(config.TerrainElevationOffset) <= 1e-12)
+            CalibrateSeaLevel(targetOceanAreaFraction, radius);
+        InitializeInventories(config.InitialMineralScale);
+        OceanAreaFraction = CalculateOceanAreaFraction();
         SeedProducers(config.InitialMineralScale);
     }
 
@@ -354,6 +401,7 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
     public double TotalEdibleOrganics => Sum(_edibleOrganics);
     public double TotalOrganicMatter => TotalVegetation + TotalEdibleOrganics + TotalDetritus + TotalMetabolicWaste;
     public double TotalEnvironmentMatter => TotalMinerals + TotalOrganicMatter;
+    public double OceanAreaFraction { get; private set; }
     public double TotalOxygen => Sum(_dissolvedOxygen) + Sum(_airOxygen);
     public double CumulativeExternalOxygenSupply { get; private set; }
 
@@ -361,6 +409,8 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         _terrain.All(double.IsFinite) &&
         _temperature.All(value => double.IsFinite(value) && value >= 0.0) &&
         _light.All(value => double.IsFinite(value) && value >= 0.0) &&
+        _cellAreas.All(value => double.IsFinite(value) && value > 0.0) &&
+        _habitatVariation.All(value => double.IsFinite(value) && value >= 0.0 && value <= 1.0) &&
         _minerals.All(value => double.IsFinite(value) && value >= 0.0) &&
         _landPlants.All(value => double.IsFinite(value) && value >= 0.0) &&
         _algae.All(value => double.IsFinite(value) && value >= 0.0) &&
@@ -409,14 +459,15 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
 
     public EnvironmentResourceSnapshot CaptureResourceSnapshot()
     {
-        double spacing = _worldSize / (_gridSize - 1);
+        double averageCellArea = 4.0 * Math.PI * Math.Pow(SphericalWorld.Radius(_worldSize), 2.0) /
+            _terrain.Length;
         double[] waterDepth = new double[_terrain.Length];
         for (int index = 0; index < waterDepth.Length; index++)
             waterDepth[index] = Math.Max(0.0, -_terrain[index]);
         return new EnvironmentResourceSnapshot(
             _gridSize,
             _worldSize,
-            spacing * spacing,
+            averageCellArea,
             (double[])_terrain.Clone(),
             waterDepth,
             (double[])_minerals.Clone(),
@@ -424,7 +475,11 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
             (double[])_algae.Clone(),
             (double[])_edibleOrganics.Clone(),
             (double[])_detritus.Clone(),
-            (double[])_metabolicWaste.Clone());
+            (double[])_metabolicWaste.Clone())
+        {
+            CellAreas = (double[])_cellAreas.Clone(),
+            OceanAreaFraction = OceanAreaFraction
+        };
     }
 
     public double WithdrawMatter(Vector2 position, double requestedAmount)
@@ -819,7 +874,8 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
             double usableLightFactor = _terrain[index] >= 0.0
                 ? _light[index]
                 : NearSurfaceAlgaeLight(index);
-            double usableLight = usableLightFactor * _lightEnergyFluxPerCell * stepSeconds;
+            double usableLight = usableLightFactor * _lightEnergyFluxPerWorldAreaPerSecond *
+                _cellAreas[index] * stepSeconds;
             double room = Math.Max(0.0, capacity - producer);
             double densityLimit = capacity > 0.0 ? room / capacity : 0.0;
             double growth = Math.Min(
@@ -881,8 +937,18 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
             for (int x = 0; x < _gridSize; x++)
             {
                 int neighborX = x + offsetX, neighborY = y + offsetY;
-                if (neighborX < 0 || neighborX >= _gridSize || neighborY < 0 || neighborY >= _gridSize)
-                    continue;
+                if (neighborY < 0)
+                {
+                    neighborY = -neighborY;
+                    neighborX += _gridSize / 2;
+                }
+                else if (neighborY >= _gridSize)
+                {
+                    neighborY = (2 * (_gridSize - 1)) - neighborY;
+                    neighborX += _gridSize / 2;
+                }
+                neighborX %= _gridSize;
+                if (neighborX < 0) neighborX += _gridSize;
                 int sourceIndex = Index(x, y), targetIndex = Index(neighborX, neighborY);
                 bool land = _terrain[sourceIndex] >= 0.0;
                 if ((_terrain[targetIndex] >= 0.0) != land || _producerCapacity[targetIndex] <= 0.0)
@@ -912,7 +978,8 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         for (int index = 0; index < _lightEnergyBudget.Length; index++)
             _lightEnergyBudget[index] = Math.Max(
                 0.0,
-                (_light[index] * _lightEnergyFluxPerCell * deltaSeconds) - _producerLightClaim[index]);
+                (_light[index] * _lightEnergyFluxPerWorldAreaPerSecond * _cellAreas[index] * deltaSeconds) -
+                _producerLightClaim[index]);
 
         Dictionary<ulong, double> allocations = [];
         var grouped = requests.GroupBy(request =>
@@ -947,21 +1014,15 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
     {
         command.Validate(_worldSize);
         double totalMatterDelta = 0.0;
-        double spacing = _worldSize / (_gridSize - 1);
-        int minimumX = Math.Max(0, (int)Math.Floor((command.Position.X - command.Radius) / spacing));
-        int maximumX = Math.Min(_gridSize - 1, (int)Math.Ceiling((command.Position.X + command.Radius) / spacing));
-        int minimumY = Math.Max(0, (int)Math.Floor((command.Position.Y - command.Radius) / spacing));
-        int maximumY = Math.Min(_gridSize - 1, (int)Math.Ceiling((command.Position.Y + command.Radius) / spacing));
-
-        for (int y = minimumY; y <= maximumY; y++)
+        Vector2 brushCenter = SphericalWorld.Normalize(command.Position, _worldSize);
+        for (int y = 0; y < _gridSize; y++)
         {
-            double worldY = y * spacing;
-            for (int x = minimumX; x <= maximumX; x++)
+            float worldY = y * _worldSize / (_gridSize - 1f);
+            for (int x = 0; x < _gridSize; x++)
             {
-                double worldX = x * spacing;
-                double distance = Math.Sqrt(
-                    Math.Pow(worldX - command.Position.X, 2.0) +
-                    Math.Pow(worldY - command.Position.Y, 2.0));
+                float worldX = x * _worldSize / _gridSize;
+                double distance = SphericalWorld.Distance(
+                    brushCenter, new Vector2(worldX, worldY), _worldSize);
                 if (distance >= command.Radius)
                     continue;
 
@@ -1008,6 +1069,68 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
 
     private int Index(int x, int y) => (y * _gridSize) + x;
 
+    private void CalibrateSeaLevel(double targetOceanFraction, double radius)
+    {
+        int[] order = Enumerable.Range(0, _terrain.Length)
+            .OrderBy(index => _terrain[index])
+            .ToArray();
+        double targetArea = Sum(_cellAreas) * targetOceanFraction;
+        double accumulated = 0.0;
+        double seaLevel = _terrain[order[^1]];
+        foreach (int index in order)
+        {
+            accumulated += _cellAreas[index];
+            seaLevel = _terrain[index];
+            if (accumulated >= targetArea) break;
+        }
+        for (int index = 0; index < _terrain.Length; index++)
+            _terrain[index] = Math.Clamp(_terrain[index] - seaLevel, -0.85 * radius, 0.35 * radius);
+    }
+
+    private void InitializeInventories(double initialMineralScale)
+    {
+        Array.Clear(_minerals);
+        Array.Clear(_detritus);
+        Array.Clear(_metabolicWaste);
+        Array.Clear(_dissolvedOxygen);
+        Array.Clear(_dissolvedOxygenCapacity);
+        for (int index = 0; index < _terrain.Length; index++)
+        {
+            double variation = _habitatVariation[index];
+            double areaScale = _cellAreas[index] / _referenceCellArea;
+            double inland = SmoothStep(-1.5, 6.0, _terrain[index]);
+            double coast = Math.Exp(-Math.Abs(_terrain[index]) / 3.5);
+            double oceanFloor = 0.020 + (variation * 0.035);
+            _minerals[index] = initialMineralScale * areaScale *
+                (oceanFloor + (0.11 * coast) + (2.10 * inland));
+            _detritus[index] = initialMineralScale * areaScale *
+                ((0.018 * coast) + (0.16 * inland * (0.75 + (0.25 * variation))));
+
+            _airOxygenCapacity[index] = 4.0 * areaScale;
+            double airAvailability = Math.Clamp(0.30 + ((variation - 0.5) * 0.08), 0.22, 0.38);
+            _airOxygen[index] = _airOxygenCapacity[index] * airAvailability;
+            _airOxygenEquilibrium[index] = _airOxygen[index];
+            double waterDepth = Math.Max(0.0, -_terrain[index]);
+            if (waterDepth <= 0.0) continue;
+            _dissolvedOxygenCapacity[index] = (0.85 + (0.025 * waterDepth)) * areaScale;
+            double mixing = Math.Clamp(_flow[index].Length() * 4.0, 0.0, 0.55);
+            double dissolvedAvailability = Math.Clamp(
+                0.18 + (0.16 * mixing) + ((variation - 0.5) * 0.05), 0.08, 0.36);
+            _dissolvedOxygen[index] = _dissolvedOxygenCapacity[index] * dissolvedAvailability;
+        }
+    }
+
+    private double CalculateOceanAreaFraction()
+    {
+        double ocean = 0.0, total = 0.0;
+        for (int index = 0; index < _terrain.Length; index++)
+        {
+            total += _cellAreas[index];
+            if (_terrain[index] < 0.0) ocean += _cellAreas[index];
+        }
+        return total > 0.0 ? ocean / total : 0.0;
+    }
+
     private void SeedProducers(double initialMineralScale)
     {
         // Shift a bounded one-time fraction of the rich interior store into the
@@ -1017,7 +1140,7 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         for (int index = 0; index < _minerals.Length; index++)
         {
             if (_terrain[index] >= 0.0) landMinerals += _minerals[index];
-            else waterLightWeight += NearSurfaceAlgaeLight(index);
+            else waterLightWeight += NearSurfaceAlgaeLight(index) * _cellAreas[index];
         }
         const double inlandTransferFraction = 0.12;
         double transfer = landMinerals * inlandTransferFraction;
@@ -1026,17 +1149,19 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
             if (_terrain[index] >= 0.0)
                 _minerals[index] *= 1.0 - inlandTransferFraction;
             else if (waterLightWeight > 0.0)
-                _minerals[index] += transfer * NearSurfaceAlgaeLight(index) / waterLightWeight;
+                _minerals[index] += transfer * NearSurfaceAlgaeLight(index) * _cellAreas[index] /
+                    waterLightWeight;
         }
 
         for (int index = 0; index < _minerals.Length; index++)
         {
+            double areaScale = _cellAreas[index] / _referenceCellArea;
             if (_terrain[index] >= 0.0)
             {
                 double landSuitability = Math.Clamp(
                     (0.25 + (0.75 * _moisture[index])) * SmoothStep(0.0, 3.5, _terrain[index]),
                     0.0, 1.0);
-                _producerCapacity[index] = initialMineralScale * 2.2 * landSuitability;
+                _producerCapacity[index] = initialMineralScale * areaScale * 2.2 * landSuitability;
                 double seed = Math.Min(_minerals[index] * 0.18, _producerCapacity[index] * 0.055);
                 _minerals[index] -= seed;
                 _landPlants[index] = seed;
@@ -1044,7 +1169,7 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
             else
             {
                 double algaeLight = NearSurfaceAlgaeLight(index);
-                _producerCapacity[index] = initialMineralScale * 0.60 * algaeLight;
+                _producerCapacity[index] = initialMineralScale * areaScale * 0.60 * algaeLight;
                 double seed = Math.Min(_minerals[index] * 0.62, _producerCapacity[index] * 0.15);
                 _minerals[index] -= seed;
                 _algae[index] = seed;
@@ -1068,6 +1193,20 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         return t * t * (3.0 - (2.0 * t));
     }
 
+    private static double SphericalNoise(
+        Vector3 unit,
+        ReadOnlySpan<Vector3> directions,
+        ReadOnlySpan<double> phases,
+        ReadOnlySpan<double> frequencies,
+        ReadOnlySpan<double> weights)
+    {
+        double value = 0.0;
+        for (int index = 0; index < directions.Length; index++)
+            value += weights[index] * Math.Sin(
+                frequencies[index] * Math.PI * Vector3.Dot(unit, directions[index]) + phases[index]);
+        return Math.Clamp(value, -1.0, 1.0);
+    }
+
     private static int DominantCell(CellQuad quad)
     {
         int index=quad.I00;double weight=quad.W00;
@@ -1082,11 +1221,12 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         if (!float.IsFinite(position.X) || !float.IsFinite(position.Y))
             throw new ArgumentOutOfRangeException(nameof(position));
 
-        double scaledX = Math.Clamp(position.X, 0f, _worldSize) * (_gridSize - 1) / _worldSize;
-        double scaledY = Math.Clamp(position.Y, 0f, _worldSize) * (_gridSize - 1) / _worldSize;
-        int x0 = (int)Math.Floor(scaledX);
+        Vector2 normalized = SphericalWorld.Normalize(position, _worldSize);
+        double scaledX = normalized.X * _gridSize / _worldSize;
+        double scaledY = normalized.Y * (_gridSize - 1) / _worldSize;
+        int x0 = (int)Math.Floor(scaledX) % _gridSize;
         int y0 = (int)Math.Floor(scaledY);
-        int x1 = Math.Min(x0 + 1, _gridSize - 1);
+        int x1 = (x0 + 1) % _gridSize;
         int y1 = Math.Min(y0 + 1, _gridSize - 1);
         double tx = scaledX - x0;
         double ty = scaledY - y0;

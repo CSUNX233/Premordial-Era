@@ -21,17 +21,22 @@ internal readonly record struct SpatialOccupant(
 internal sealed class SpatialOccupancyIndex
 {
     private readonly float _cellSize;
-    private readonly Dictionary<(int X,int Y),List<ulong>> _cells=[];
+    private readonly float _worldSize;
+    private readonly Dictionary<(int X,int Y,int Z),List<ulong>> _cells=[];
     private readonly Dictionary<ulong,SpatialOccupant> _occupants=[];
-    private readonly Dictionary<ulong,(int X,int Y)> _keys=[];
+    private readonly Dictionary<ulong,(int X,int Y,int Z)> _keys=[];
     private float _maximumRadius;
 
-    public SpatialOccupancyIndex(float cellSize)=>_cellSize=Math.Max(0.25f,cellSize);
+    public SpatialOccupancyIndex(float cellSize,float worldSize)
+    {
+        _cellSize=Math.Max(0.25f,cellSize);
+        _worldSize=worldSize;
+    }
     public IEnumerable<SpatialOccupant> Occupants=>_occupants.Values;
 
     public void Upsert(SpatialOccupant occupant)
     {
-        (int X,int Y) key=Key(occupant.Position);
+        (int X,int Y,int Z) key=Key(occupant.Position);
         if(_keys.TryGetValue(occupant.Id,out var oldKey)&&oldKey!=key)
             RemoveFromCell(oldKey,occupant.Id);
         if(!_keys.ContainsKey(occupant.Id)||oldKey!=key)
@@ -53,9 +58,9 @@ internal sealed class SpatialOccupancyIndex
     public IEnumerable<SpatialOccupant> Query(Vector2 position,float radius)
     {
         int range=(int)Math.Ceiling((radius+_maximumRadius)/_cellSize);
-        (int X,int Y) center=Key(position);
-        for(int y=-range;y<=range;y++)for(int x=-range;x<=range;x++)
-            if(_cells.TryGetValue((center.X+x,center.Y+y),out List<ulong>? bucket))
+        (int X,int Y,int Z) center=Key(position);
+        for(int z=-range;z<=range;z++)for(int y=-range;y<=range;y++)for(int x=-range;x<=range;x++)
+            if(_cells.TryGetValue((center.X+x,center.Y+y,center.Z+z),out List<ulong>? bucket))
                 foreach(ulong id in bucket)yield return _occupants[id];
     }
 
@@ -66,17 +71,21 @@ internal sealed class SpatialOccupancyIndex
             if(other.Id==ignoreId)continue;
             float horizontal=shape.HorizontalRadius+other.Shape.HorizontalRadius;
             float vertical=shape.VerticalHalfExtent+other.Shape.VerticalHalfExtent;
-            Vector2 planar=position-other.Position;
-            double normalized=planar.LengthSquared()/Math.Max(1e-8,horizontal*horizontal)+
+            double surfaceDistance=SphericalWorld.Distance(position,other.Position,_worldSize);
+            double normalized=(surfaceDistance*surfaceDistance)/Math.Max(1e-8,horizontal*horizontal)+
                 Math.Pow((depth-other.Depth)/Math.Max(1e-4,vertical),2);
             if(normalized<1.0)return false;
         }
         return true;
     }
 
-    private (int X,int Y) Key(Vector2 position)=>
-        ((int)MathF.Floor(position.X/_cellSize),(int)MathF.Floor(position.Y/_cellSize));
-    private void RemoveFromCell((int X,int Y) key,ulong id)
+    private (int X,int Y,int Z) Key(Vector2 position)
+    {
+        Vector3 point=SphericalWorld.ToUnit(position,_worldSize)*(float)SphericalWorld.Radius(_worldSize);
+        return ((int)MathF.Floor(point.X/_cellSize),(int)MathF.Floor(point.Y/_cellSize),
+            (int)MathF.Floor(point.Z/_cellSize));
+    }
+    private void RemoveFromCell((int X,int Y,int Z) key,ulong id)
     {
         if(!_cells.TryGetValue(key,out List<ulong>? bucket))return;
         bucket.Remove(id);if(bucket.Count==0)_cells.Remove(key);

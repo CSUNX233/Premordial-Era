@@ -5,16 +5,26 @@ namespace NativeEpoch.Godot;
 public sealed partial class Stage3Hud : CanvasLayer
 {
     private Label _statistics = null!;
+    private Label _detailedStatistics = null!;
     private Label _inspector = null!;
+    private Label _detailedInspector = null!;
+    private VBoxContainer _lifeBars = null!;
+    private ProgressBar _growthBar = null!;
+    private ProgressBar _energyBar = null!;
     private Label _status = null!;
     private Label _mode = null!;
     private Button _pause = null!;
+    private LineEdit _seed = null!;
     private PanelContainer _toolPanel = null!;
     private PanelContainer _inspectorPanel = null!;
     private PanelContainer _timePanel = null!;
     private bool _compactLayout;
     private int _layoutBand = -1;
+    private bool _inspectorWanted;
 
+    private Label _tracking = null!;
+    public event Action? RandomIndividualRequested;
+    public void SetTracking(ulong? id) => _tracking.Text = id.HasValue ? $"追踪 #{id.Value}" : "自由视角";
     public event Action? PauseRequested;
     public event Action? StepRequested;
     public event Action<double>? SpeedRequested;
@@ -27,6 +37,7 @@ public sealed partial class Stage3Hud : CanvasLayer
     public event Action? MediumDiagnosticRequested;
     public event Action? MorphologyLabRequested;
     public event Action? FunctionCatalogueRequested;
+    public event Action<ulong>? SeedWorldRequested;
 
     public override void _Ready()
     {
@@ -49,16 +60,28 @@ public sealed partial class Stage3Hud : CanvasLayer
         }
     }
 
-    public void UpdateStatistics(string text)
+    public void UpdateStatistics(string text, string? summary = null)
     {
-        if (_statistics.Text != text)
-            _statistics.Text = text;
+        if (_detailedStatistics.Text != text) _detailedStatistics.Text = text;
+        string visible = summary ?? text.Split('\n')[0];
+        if (_statistics.Text != visible) _statistics.Text = visible;
     }
 
-    public void UpdateInspector(string text)
+    public void RevealInspector()
     {
-        if (_inspector.Text != text)
-            _inspector.Text = text;
+        _inspectorWanted = true;
+        _inspectorPanel.Visible = true;
+        if (_compactLayout) _toolPanel.Visible = false;
+    }
+
+    public void UpdateInspector(string text, string? summary = null, double growth = 0, double energy = 0)
+    {
+        string visible = summary ?? text;
+        if (_inspector.Text != visible) _inspector.Text = visible;
+        if (_detailedInspector.Text != text) _detailedInspector.Text = text;
+        _lifeBars.Visible = summary is not null;
+        _growthBar.Value = Math.Clamp(growth * 100, 0, 100);
+        _energyBar.Value = Math.Clamp(energy * 100, 0, 100);
     }
 
     public void UpdateStatus(string text)
@@ -74,6 +97,7 @@ public sealed partial class Stage3Hud : CanvasLayer
     }
 
     public void SetPaused(bool paused) => _pause.Text = paused ? "继续" : "暂停";
+    public void SetSeed(ulong seed) => _seed.Text = seed.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     private void BuildTimeBar(Theme theme)
     {
@@ -96,10 +120,16 @@ public sealed partial class Stage3Hud : CanvasLayer
         HBoxContainer row = new();
         row.AddThemeConstantOverride("separation", 7);
         root.AddChild(row);
-        Label title = new() { Text = "原生纪 · 观察台" };
-        title.AddThemeFontSizeOverride("font_size", 20);
-        title.AddThemeColorOverride("font_color", new Color("8ed6c9"));
-        row.AddChild(title);
+        VBoxContainer branding = new();
+        row.AddChild(branding);
+        Label title = new() { Text = "原生纪" };
+        title.AddThemeFontSizeOverride("font_size", 25);
+        title.AddThemeColorOverride("font_color", new Color("b5efdf"));
+        branding.AddChild(title);
+        Label subtitle = new() { Text = "一颗星球，生命的无数可能" };
+        subtitle.AddThemeFontSizeOverride("font_size", 12);
+        subtitle.AddThemeColorOverride("font_color", new Color("86a5b4"));
+        branding.AddChild(subtitle);
         _statistics = new Label
         {
             Text = "准备模拟…",
@@ -114,6 +144,9 @@ public sealed partial class Stage3Hud : CanvasLayer
         controls.AddThemeConstantOverride("h_separation", 7);
         controls.AddThemeConstantOverride("v_separation", 5);
         root.AddChild(controls);
+        AddButton(controls, "随机个体", "随机定位一个存活个体并追踪；缩远自动停止", () => RandomIndividualRequested?.Invoke());
+        _tracking = new Label { Text = "自由视角" };
+        controls.AddChild(_tracking);
         _pause = AddButton(controls, "暂停", "暂停或继续固定步模拟", () => PauseRequested?.Invoke());
         AddButton(controls, "功能图鉴（G）", "查看、收藏与定位已观察到的功能", () => FunctionCatalogueRequested?.Invoke());
         AddButton(controls, "单步", "只执行一个 0.1 秒模拟步", () => StepRequested?.Invoke());
@@ -121,8 +154,8 @@ public sealed partial class Stage3Hud : CanvasLayer
         AddButton(controls, "10×", "每秒目标执行 100 个固定步", () => SpeedRequested?.Invoke(10));
         AddButton(controls, "100×", "降低画面刷新频率但不跳过生命事件", () => SpeedRequested?.Invoke(100));
         AddButton(controls, "1000×", "按机器能力批量执行固定步", () => SpeedRequested?.Invoke(1000));
-        AddButton(controls, "工具栏", "显示或折叠左侧工具栏", () => TogglePanel(_toolPanel));
-        AddButton(controls, "检查器", "显示或折叠右侧检查器", () => TogglePanel(_inspectorPanel));
+        AddButton(controls, "世界", "显示或折叠世界与环境工具", () => TogglePanel(_toolPanel));
+        AddButton(controls, "生命", "显示或折叠个体详情", () => TogglePanel(_inspectorPanel));
     }
 
     private void BuildToolPanel(Theme theme)
@@ -134,7 +167,7 @@ public sealed partial class Stage3Hud : CanvasLayer
             OffsetTop = 130,
             AnchorBottom = 1.0f,
             OffsetBottom = -16,
-            CustomMinimumSize = new Vector2(286, 0)
+            CustomMinimumSize = new Vector2(264, 0)
         };
         AddChild(_toolPanel);
         FadeIn(_toolPanel);
@@ -152,8 +185,39 @@ public sealed partial class Stage3Hud : CanvasLayer
         _mode.AddThemeColorOverride("font_color", new Color("8ed6c9"));
         root.AddChild(_mode);
 
+        root.AddChild(new Label { Text = "世界种子", TooltipText = "相同种子生成相同地形" });
+        _seed = new LineEdit { Text = "20260908", MaxLength = 20,
+            PlaceholderText = "输入非负整数", CustomMinimumSize = new Vector2(226, 0) };
+        root.AddChild(_seed);
+        void GenerateSeed()
+        {
+            if (!ulong.TryParse(_seed.Text.Trim(), out ulong value))
+            {
+                UpdateStatus("种子请输入 0 至 18446744073709551615 的整数。");
+                return;
+            }
+            _seed.ReleaseFocus();
+            SeedWorldRequested?.Invoke(value);
+        }
+        _seed.TextSubmitted += _ => GenerateSeed();
+        HBoxContainer seedButtons = new();
+        root.AddChild(seedButtons);
+        AddButton(seedButtons, "按种子生成", "替换当前世界，生成 24 只水生祖先", GenerateSeed);
+        AddButton(seedButtons, "随机星球", "选择新种子并替换当前世界", () =>
+        {
+            SetSeed((ulong)System.Random.Shared.NextInt64(1, 1_000_000_000));
+            GenerateSeed();
+        });
+
         AddButton(root, "少量祖先 24", "重建一个便于观察生命循环的小世界", () => SmallWorldRequested?.Invoke());
         AddButton(root, "观察负载 300（预演 8 秒）", "重建并真实运行 80 个固定步，让身体结构立即可见", () => ObservationWorldRequested?.Invoke());
+        _detailedStatistics = new Label { Visible = false,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart, CustomMinimumSize = new Vector2(228, 0) };
+        _detailedStatistics.AddThemeFontSizeOverride("font_size", 12);
+        _detailedStatistics.AddThemeColorOverride("font_color", new Color("9cb4bf"));
+        AddButton(root, "生态统计", "展开详细种群、资源与性能统计", () =>
+            _detailedStatistics.Visible = !_detailedStatistics.Visible);
+        root.AddChild(_detailedStatistics);
         root.AddChild(new HSeparator());
         AddButton(root, "选择工具 [1]", "点击最近个体，在右侧显示它的快照", () => SelectToolRequested?.Invoke());
         AddButton(root, "矿物笔刷 [2]", "连续圆形衰减；左键增加，Shift+左键移除", () => MineralToolRequested?.Invoke());
@@ -164,16 +228,16 @@ public sealed partial class Stage3Hud : CanvasLayer
 
         _status = new Label
         {
-            Text = "左键选择；右键拖动旋转镜头。",
+            Text = "左键选择生命；右键拖动查看星球。",
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
-            CustomMinimumSize = new Vector2(260, 54)
+            CustomMinimumSize = new Vector2(228, 54)
         };
-        _status.AddThemeColorOverride("font_color", new Color("f2ca7c"));
+        _status.AddThemeColorOverride("font_color", new Color("92b6b3"));
         root.AddChild(_status);
 
         Label help = new()
         {
-            Text = "W前进 / S后退 · 右键拖动旋转 · 滚轮缩放\n[ / ] 调笔刷 · F2 形态样本台 · F11 全屏 · Tab 隐藏界面\n\n绿植与水藻属于可摄食生物量。观察生产、摄食、分解和捕食通量；图鉴收藏不会直接改变基因。",
+            Text = "W/S 前后、A/D 左右沿球面移动\n右键：远景转动星球，近景旋转视角 · 滚轮缩放\n[ / ] 调笔刷 · F2 形态样本台 · F11 全屏 · Tab 隐藏界面\n\n绿植与水藻属于可摄食生物量。观察生产、摄食、分解和捕食通量；图鉴收藏不会直接改变基因。",
             AutowrapMode = TextServer.AutowrapMode.WordSmart
         };
         help.AddThemeColorOverride("font_color", new Color("aebccc"));
@@ -202,16 +266,42 @@ public sealed partial class Stage3Hud : CanvasLayer
         VBoxContainer root = new();
         root.AddThemeConstantOverride("separation", 7);
         scroll.AddChild(root);
-        Label heading = new() { Text = "个体检查器" };
+        Label heading = new() { Text = "生命档案" };
         heading.AddThemeFontSizeOverride("font_size", 17);
         root.AddChild(heading);
         _inspector = new Label
         {
-            Text = "选择工具下点击一个生命。\n详情仅为选中个体创建和刷新。",
+            Text = "点击星球上的生命，\n观察它的成长与变化。",
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
-            CustomMinimumSize = new Vector2(320, 220)
+            CustomMinimumSize = new Vector2(270, 0)
         };
         root.AddChild(_inspector);
+        _lifeBars = new VBoxContainer { Visible = false };
+        _lifeBars.AddThemeConstantOverride("separation", 9);
+        root.AddChild(_lifeBars);
+        ProgressBar Bar(string text, Color color)
+        {
+            Label label = new() { Text = text };
+            label.AddThemeColorOverride("font_color", new Color("8faebc"));
+            label.AddThemeFontSizeOverride("font_size", 12);
+            _lifeBars.AddChild(label);
+            ProgressBar bar = new() { ShowPercentage = false, CustomMinimumSize = new Vector2(264, 7) };
+            bar.AddThemeStyleboxOverride("background", new StyleBoxFlat { BgColor = new Color("10232e"),
+                CornerRadiusTopLeft = 3, CornerRadiusTopRight = 3, CornerRadiusBottomLeft = 3, CornerRadiusBottomRight = 3 });
+            bar.AddThemeStyleboxOverride("fill", new StyleBoxFlat { BgColor = color,
+                CornerRadiusTopLeft = 3, CornerRadiusTopRight = 3, CornerRadiusBottomLeft = 3, CornerRadiusBottomRight = 3 });
+            _lifeBars.AddChild(bar);
+            return bar;
+        }
+        _growthBar = Bar("成长", new Color("75cdb3"));
+        _energyBar = Bar("可用能量", new Color("e0bf7c"));
+        _detailedInspector = new Label { Visible = false,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart, CustomMinimumSize = new Vector2(270, 0) };
+        _detailedInspector.AddThemeFontSizeOverride("font_size", 12);
+        _detailedInspector.AddThemeColorOverride("font_color", new Color("9cb4bf"));
+        AddButton(root, "基因与生理明细", "展开当前个体的完整组织与生理数据", () =>
+            _detailedInspector.Visible = !_detailedInspector.Visible);
+        root.AddChild(_detailedInspector);
     }
 
     private static Button AddButton(Container parent, string text, string tooltip, Action action)
@@ -250,7 +340,7 @@ public sealed partial class Stage3Hud : CanvasLayer
         else
         {
             _toolPanel.Visible = true;
-            _inspectorPanel.Visible = true;
+            _inspectorPanel.Visible = _inspectorWanted;
         }
     }
 
@@ -260,6 +350,7 @@ public sealed partial class Stage3Hud : CanvasLayer
     private void TogglePanel(Control panel)
     {
         bool show = !panel.Visible;
+        if (panel == _inspectorPanel) _inspectorWanted = show;
         if (_compactLayout && show)
         {
             _toolPanel.Visible = false;

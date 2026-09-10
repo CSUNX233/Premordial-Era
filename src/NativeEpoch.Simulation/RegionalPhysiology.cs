@@ -272,10 +272,8 @@ public static class RegionalPhysiology
                 exposedSamples++;
                 double localX = (surface.LocalPosition.X * cosine) - (surface.LocalPosition.Z * sine);
                 double localY = (surface.LocalPosition.X * sine) + (surface.LocalPosition.Z * cosine);
-                Vector2 samplePosition = Vector2.Clamp(
-                    organismPosition + new Vector2((float)localX, (float)localY),
-                    Vector2.Zero,
-                    new Vector2(config.WorldSize));
+                Vector2 samplePosition = SphericalWorld.OffsetPosition(
+                    organismPosition, new Vector2((float)localX, (float)localY), config.WorldSize);
                 double elevation = centerElevation + surface.LocalPosition.Y;
                 EnvironmentSample surfaceEnvironment = environment.Sample(samplePosition, depth);
                 bool waterSide = surfaceEnvironment.WaterDepth > 0.0 &&

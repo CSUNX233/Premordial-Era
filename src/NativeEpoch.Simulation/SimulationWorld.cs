@@ -50,7 +50,7 @@ public sealed class SimulationWorld
         _nextOrganisms = new(Math.Min(config.MaxPopulation, ancestorCount * 2));
         Genomes = new GenomeRegistry();
         Genome? sharedFounder = founderGenome ?? (config.RandomizeFounders ? null : Genome.CreateAncestor());
-        SpatialOccupancyIndex initialOccupancy=new(_config.SeparationRadius);
+        SpatialOccupancyIndex initialOccupancy=new(_config.SeparationRadius,_config.WorldSize);
 
         for (int index = 0; index < ancestorCount; index++)
         {
@@ -265,7 +265,7 @@ public sealed class SimulationWorld
             double energyFraction=Math.Clamp(organism.Body.TotalEnergy/_config.MaximumEnergy,0,1);
             double meanConductivity=genome.Regions.Average(region=>region.SignalConductivity);
             ForagingDecision foraging=BehaviorController.UpdateForaging(organism.ForagingMemory,
-                foragingObservation,energyFraction,meanConductivity,_config,dt);
+                foragingObservation,energyFraction,meanConductivity,_config,dt,spherical:true);
             organism.ForagingCue=foragingObservation.CenterCue;
             organism.ForagingTrend=foraging.ResourceTrend;
             organism.ExplorationDrive=foraging.Activity;
@@ -580,11 +580,12 @@ public sealed class SimulationWorld
     }
 
     public static bool AreWithinContactRange(
-        Vector2 firstPosition, float firstDepth, Vector2 secondPosition, float secondDepth, float radius)
+        Vector2 firstPosition, float firstDepth, Vector2 secondPosition, float secondDepth, float radius,
+        float worldSize=512f)
     {
-        Vector2 planar = firstPosition - secondPosition;
         float vertical = firstDepth - secondDepth;
-        return planar.LengthSquared() + vertical * vertical < radius * radius;
+        double surface = SphericalWorld.Distance(firstPosition, secondPosition, worldSize);
+        return (surface * surface) + (vertical * vertical) < radius * radius;
     }
 
     public bool RelocateForMediumDiagnostic(ulong organismId, Vector2 position, float depth,
@@ -596,6 +597,7 @@ public sealed class SimulationWorld
         int index = _organisms.FindIndex(organism => organism.Id == organismId);
         if (index < 0) return false;
         Organism organism = _organisms[index];
+        position=SphericalWorld.Normalize(position,_config.WorldSize);
         EnvironmentSample sample = _environment.Sample(position);
         organism.Position = position;
         organism.Velocity = Vector2.Zero;
@@ -621,9 +623,10 @@ public sealed class SimulationWorld
         {
             for (int attempt = 0; attempt < _config.MaximumAquaticSpawnAttempts; attempt++)
             {
+                double cosineTheta=1.0-(2.0*random.NextUnitDouble());
                 Vector2 position = new(
-                    random.NextFloat(horizontalRadius, _config.WorldSize-horizontalRadius),
-                    random.NextFloat(horizontalRadius, _config.WorldSize-horizontalRadius));
+                    random.NextFloat(0f, _config.WorldSize),
+                    (float)(Math.Acos(cosineTheta)*_config.WorldSize/Math.PI));
                 EnvironmentSample sample = _environment.Sample(position);
                 bool preferredPhoticShelf = sample.WaterDepth <= _config.PreferredAquaticSpawnMaximumDepth;
                 if (sample.WaterDepth < minimum || (pass == 0 && !preferredPhoticShelf))
@@ -650,18 +653,20 @@ public sealed class SimulationWorld
         {
             double angle = _reproductionRandom.NextUnitDouble() * Math.Tau;
             float distance = _reproductionRandom.NextFloat(minimumDistance,maximumDistance);
-            Vector2 rawCandidate=parent.Position+new Vector2(
-                (float)Math.Cos(angle)*distance,(float)Math.Sin(angle)*distance);
-            Vector2 candidate=Vector2.Clamp(rawCandidate,
-                new Vector2(childShape.HorizontalRadius),
-                new Vector2(_config.WorldSize-childShape.HorizontalRadius));
+            Vector2 candidate=SphericalWorld.OffsetPosition(parent.Position,new Vector2(
+                (float)Math.Cos(angle)*distance,(float)Math.Sin(angle)*distance),_config.WorldSize);
             EnvironmentSample sample = _environment.Sample(candidate);
-            if (sample.WaterDepth <= childShape.VerticalHalfExtent*2.0f) continue;
-            float verticalRange=parentShape.VerticalHalfExtent+childShape.VerticalHalfExtent+0.15f;
-            float candidateDepth=(float)Math.Clamp(parent.Depth+
-                    ((_reproductionRandom.NextUnitDouble()-0.5)*2.0*verticalRange),
-                childShape.VerticalHalfExtent,
-                sample.WaterDepth-childShape.VerticalHalfExtent);
+            // Only founders require an aquatic spawn. Descendants may occupy
+            // land or shallow water; physiology decides whether they survive.
+            float candidateDepth = 0f;
+            if (sample.WaterDepth > 0.0)
+            {
+                float half = Math.Min(childShape.VerticalHalfExtent, (float)sample.WaterDepth * 0.5f);
+                float verticalRange = parentShape.VerticalHalfExtent + childShape.VerticalHalfExtent + 0.15f;
+                candidateDepth = (float)Math.Clamp(parent.Depth +
+                    ((_reproductionRandom.NextUnitDouble() - 0.5) * 2.0 * verticalRange),
+                    half, Math.Max(half, sample.WaterDepth - half));
+            }
             if(!occupancy.CanPlace(candidate,candidateDepth,childShape))continue;
             position=candidate;depth=candidateDepth;return true;
         }
@@ -682,7 +687,8 @@ public sealed class SimulationWorld
             Id = id, ParentId = parent.Id, GenomeId = genomeId, Position = position,
             Depth = depth, HeadingRadians = NormalizeAngle(parent.HeadingRadians +
                 ((_reproductionRandom.NextUnitDouble() - 0.5) * 0.35)),
-            Hydration = RegionalPhysiology.BodyHydration(body, genome), Immersion = 1,
+            Hydration = RegionalPhysiology.BodyHydration(body, genome),
+            Immersion = _environment.Sample(position).WaterDepth > 0.0 && depth > 0f ? 1.0 : 0.0,
             ReproductionCooldownSeconds = _config.ReproductionCooldownSeconds,
             ControllerState = new double[genome.ControllerNodes.Count],
             SensorState = new double[genome.Sensors.Count],
@@ -756,11 +762,10 @@ public sealed class SimulationWorld
             sensing.ChemicalRange>0.0?sensing.ChemicalRange:_config.ForagingSenseDistance));
         Vector2 forward=new((float)Math.Cos(organism.HeadingRadians),(float)Math.Sin(organism.HeadingRadians));
         Vector2 right=new(-forward.Y,forward.X);
-        Vector2 Clamp(Vector2 value)=>Vector2.Clamp(value,Vector2.Zero,new Vector2(_config.WorldSize));
         Vector2 center=organism.Position;
-        Vector2 ahead=Clamp(center+forward*distance);
-        Vector2 left=Clamp(center-right*distance);
-        Vector2 rightPosition=Clamp(center+right*distance);
+        Vector2 ahead=SphericalWorld.OffsetPosition(center,forward*distance,_config.WorldSize);
+        Vector2 left=SphericalWorld.OffsetPosition(center,-right*distance,_config.WorldSize);
+        Vector2 rightPosition=SphericalWorld.OffsetPosition(center,right*distance,_config.WorldSize);
         EnvironmentSample centerSample=_environment.Sample(center,organism.Depth);
         double growthRemaining=Math.Max(0.0,genome.Regions.Sum(BodyCalculator.TargetMatter)-organism.Body.Cache.TotalMatter);
         double substrateTarget=Math.Max(organism.Body.Cache.TotalMatter*0.35,
@@ -860,8 +865,18 @@ public sealed class SimulationWorld
         Vector2 displacement = organism.Velocity * (float)dt;
         CumulativeDissipatedEnergy += mechanics.EnergySpent+appendage.EnergySpent;
         CumulativeMovementEnergy += mechanics.EnergySpent+appendage.EnergySpent;
-        organism.Position += displacement;
-        ClampHorizontal(ref organism);
+        Vector2 previousPosition=organism.Position;
+        Vector2 nextPosition=SphericalWorld.Advance(
+            previousPosition,organism.Velocity,dt,_config.WorldSize);
+        Vector2 headingVector=new((float)Math.Cos(organism.HeadingRadians),
+            (float)Math.Sin(organism.HeadingRadians));
+        organism.Velocity=SphericalWorld.Transport(
+            previousPosition,nextPosition,organism.Velocity,_config.WorldSize);
+        Vector2 transportedHeading=SphericalWorld.Transport(
+            previousPosition,nextPosition,headingVector,_config.WorldSize);
+        if(transportedHeading.LengthSquared()>1e-12f)
+            organism.HeadingRadians=NormalizeAngle(Math.Atan2(transportedHeading.Y,transportedHeading.X));
+        organism.Position=nextPosition;
 
         EnvironmentSample sample = _environment.Sample(organism.Position, organism.Depth);
         if (sample.WaterDepth > 0)
@@ -905,8 +920,8 @@ public sealed class SimulationWorld
             {
                 double localX=apertureSample.LocalPosition.X*c-apertureSample.LocalPosition.Z*s;
                 double localY=apertureSample.LocalPosition.X*s+apertureSample.LocalPosition.Z*c;
-                samplePosition=Vector2.Clamp(organism.Position+new Vector2((float)localX,(float)localY),
-                    Vector2.Zero,new Vector2(_config.WorldSize));
+                samplePosition=SphericalWorld.OffsetPosition(
+                    organism.Position,new Vector2((float)localX,(float)localY),_config.WorldSize);
                 EnvironmentSample surface=_environment.Sample(samplePosition);
                 double elevation=centerElevation+apertureSample.LocalPosition.Y+liftedY;
                 bool insideTerrain=elevation<surface.TerrainHeight;
@@ -938,20 +953,14 @@ public sealed class SimulationWorld
 
     private void ClampHorizontal(ref Organism organism)
     {
-        float radius=OccupancyShape.FromBody(organism.Body).HorizontalRadius;
-        float minimum=Math.Min(radius,_config.WorldSize*0.5f);
-        float maximum=Math.Max(minimum,_config.WorldSize-radius);
-        if (organism.Position.X < minimum || organism.Position.X > maximum)
-        { organism.Position.X = Math.Clamp(organism.Position.X, minimum, maximum); organism.Velocity.X *= -0.45f; }
-        if (organism.Position.Y < minimum || organism.Position.Y > maximum)
-        { organism.Position.Y = Math.Clamp(organism.Position.Y, minimum, maximum); organism.Velocity.Y *= -0.45f; }
+        organism.Position=SphericalWorld.Normalize(organism.Position,_config.WorldSize);
     }
 
     private SpatialInteractionFrame ComputeSpatialInteractions(double dt)
     {
         int count=_organisms.Count;
         SpatialInteractionState[] states=new SpatialInteractionState[count];
-        SpatialOccupancyIndex occupancy=new(_config.SeparationRadius);
+        SpatialOccupancyIndex occupancy=new(_config.SeparationRadius,_config.WorldSize);
         Dictionary<ulong,int> byId=new(count);
         OccupancyShape[] shapes=new OccupancyShape[count];
         double[] masses=new double[count];
@@ -977,7 +986,8 @@ public sealed class SimulationWorld
                 Organism second=_organisms[b];
                 float horizontal=shapes[a].HorizontalRadius+shapes[b].HorizontalRadius;
                 float vertical=shapes[a].VerticalHalfExtent+shapes[b].VerticalHalfExtent;
-                Vector2 difference=first.Position-second.Position;
+                Vector2 difference=-SphericalWorld.Delta(
+                    first.Position,second.Position,_config.WorldSize);
                 double normalizedSquared=difference.LengthSquared()/(horizontal*horizontal)+
                     Math.Pow((first.Depth-second.Depth)/vertical,2.0);
                 double normalizedDistance=Math.Sqrt(Math.Max(0.0,normalizedSquared));
@@ -1071,7 +1081,8 @@ public sealed class SimulationWorld
             Organism predator = _organisms[index], prey = _organisms[target];
             PredationResult result = ContactPredation.Attempt(
                 predator.Body, Genomes.Get(predator.GenomeId), predator.Position, predator.Depth,
-                prey.Body, Genomes.Get(prey.GenomeId), prey.Position, prey.Depth, _environment, dt);
+                prey.Body, Genomes.Get(prey.GenomeId), prey.Position, prey.Depth, _environment, dt,
+                _config.WorldSize);
             predator.PredationLastStep = result.AssimilatedOrganic;
             predator.PredationEnergyLastStep = result.EnergySpent;
             _organisms[index] = predator;
@@ -1094,7 +1105,8 @@ public sealed class SimulationWorld
                 if(verticalRatio>=1.0)continue;
                 float requiredHorizontal=(shape.HorizontalRadius+other.Shape.HorizontalRadius)*
                     (float)Math.Sqrt(Math.Max(0.0,1.0-verticalRatio*verticalRatio));
-                Vector2 difference=organism.Position-other.Position;
+                Vector2 difference=-SphericalWorld.Delta(
+                    organism.Position,other.Position,_config.WorldSize);
                 float distance=difference.Length();
                 if(distance>=requiredHorizontal)continue;
                 Vector2 direction;
@@ -1104,8 +1116,8 @@ public sealed class SimulationWorld
                     direction=new((float)Math.Cos(angle),(float)Math.Sin(angle));
                 }
                 else direction=difference/distance;
-                organism.Position+=direction*(requiredHorizontal-distance+0.001f);
-                ClampHorizontal(ref organism);
+                organism.Position=SphericalWorld.OffsetPosition(organism.Position,
+                    direction*(requiredHorizontal-distance+0.001f),_config.WorldSize);
                 corrected=true;
             }
             if(!corrected)break;

@@ -15,13 +15,16 @@ public static class ContactPredation
     public static PredationResult Attempt(
         DevelopingBody predator, Genome predatorGenome, Vector2 predatorPosition, float predatorDepth,
         DevelopingBody prey, Genome preyGenome, Vector2 preyPosition, float preyDepth,
-        IMutableEnvironmentField environment, double deltaSeconds)
+        IMutableEnvironmentField environment, double deltaSeconds, float worldSize = 0f)
     {
         if (ReferenceEquals(predator, prey) || deltaSeconds <= 0) return PredationResult.None;
         OccupancyShape a = OccupancyShape.FromBody(predator), b = OccupancyShape.FromBody(prey);
         double horizontal = a.HorizontalRadius + b.HorizontalRadius;
         double vertical = a.VerticalHalfExtent + b.VerticalHalfExtent;
-        double distance = Vector2.DistanceSquared(predatorPosition, preyPosition) / (horizontal * horizontal) +
+        double surfaceDistance = worldSize > 0f
+            ? SphericalWorld.Distance(predatorPosition, preyPosition, worldSize)
+            : Vector2.Distance(predatorPosition, preyPosition);
+        double distance = surfaceDistance * surfaceDistance / (horizontal * horizontal) +
             Math.Pow((predatorDepth - preyDepth) / vertical, 2);
         if (distance > 1.04 * 1.04) return PredationResult.None;
 

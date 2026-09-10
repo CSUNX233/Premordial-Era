@@ -92,6 +92,13 @@ public sealed class ForagingMemory
     private Vector2 _lastPosition;
     private double _stalledSeconds;
     private double _reorientationCooldown;
+    private float _worldSize;
+
+    public void SetWorldSize(float worldSize) => _worldSize = worldSize;
+
+    private double Distance(Vector2 first, Vector2 second) => _worldSize > 0f
+        ? SphericalWorld.Distance(first, second, _worldSize)
+        : Vector2.Distance(first, second);
 
     public bool Initialized { get; private set; }
     public double SmoothedCue { get; private set; }
@@ -132,7 +139,7 @@ public sealed class ForagingMemory
     public void Remember(Vector2 position,double interval,double minimumDistance)
     {
         Vector2 latest=Recent(_recentCursor==0?Math.Min(3,_recentCount-1):_recentCursor-1);
-        if(_anchorElapsed<interval&&Vector2.DistanceSquared(position,latest)<minimumDistance*minimumDistance)return;
+        if(_anchorElapsed<interval&&Distance(position,latest)<minimumDistance)return;
         switch(_recentCursor){case 0:_recent0=position;break;case 1:_recent1=position;break;case 2:_recent2=position;break;default:_recent3=position;break;}
         _recentCursor=(_recentCursor+1)%4;_recentCount=Math.Min(4,_recentCount+1);_anchorElapsed=0;
     }
@@ -140,8 +147,8 @@ public sealed class ForagingMemory
     public double Novelty(Vector2 position,double radius)
     {
         if(_recentCount==0)return 1;
-        float minimum=float.PositiveInfinity;
-        for(int index=0;index<_recentCount;index++)minimum=Math.Min(minimum,Vector2.Distance(position,Recent(index)));
+        double minimum=double.PositiveInfinity;
+        for(int index=0;index<_recentCount;index++)minimum=Math.Min(minimum,Distance(position,Recent(index)));
         return Math.Clamp(minimum/Math.Max(0.1,radius),0.0,1.0);
     }
 
@@ -149,7 +156,9 @@ public sealed class ForagingMemory
         double lateralEvidence,double deltaSeconds)
     {
         if(PreferredDirection.LengthSquared()<0.5f)PreferredDirection=forward;
-        double moved=Vector2.Distance(position,_lastPosition);
+        if (_worldSize > 0f)
+            PreferredDirection = SphericalWorld.Transport(_lastPosition, position, PreferredDirection, _worldSize);
+        double moved=Distance(position,_lastPosition);
         _stalledSeconds=moved<0.002? _stalledSeconds+deltaSeconds:Math.Max(0,_stalledSeconds-deltaSeconds*0.7);
         _lastPosition=position;
         Vector2 right=new(-forward.Y,forward.X);
@@ -258,8 +267,10 @@ public static class BehaviorController
     }
 
     public static ForagingDecision UpdateForaging(ForagingMemory memory,ForagingObservation observation,
-        double energyFraction,double signalConductivity,SimulationConfig config,double deltaSeconds)
+        double energyFraction,double signalConductivity,SimulationConfig config,double deltaSeconds,
+        bool spherical=false)
     {
+        memory.SetWorldSize(spherical ? config.WorldSize : 0f);
         double chemicalAccess=Math.Clamp(observation.ChemicalAccess,0.0,1.0);
         if(!memory.Initialized)
             memory.Initialize(observation.Position,observation.CenterCue*chemicalAccess,
@@ -279,7 +290,9 @@ public static class BehaviorController
             (1.50*Math.Clamp(observation.VisualLateralSignal,-1.0,1.0))+
             config.CuriosityStrength*(rightNovelty-leftNovelty)+
             (observation.LeftDanger-observation.RightDanger);
-        Vector2 forwardDirection=observation.AheadPosition-observation.Position;
+        Vector2 forwardDirection=spherical
+            ? SphericalWorld.Delta(observation.Position,observation.AheadPosition,config.WorldSize)
+            : observation.AheadPosition-observation.Position;
         forwardDirection=forwardDirection.LengthSquared()>1e-8f?Vector2.Normalize(forwardDirection):
             (memory.PreferredDirection.LengthSquared()>0.5f?memory.PreferredDirection:Vector2.UnitX);
         double steering=memory.UpdateDirection(observation.Position,forwardDirection,forward,lateral,deltaSeconds);

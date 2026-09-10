@@ -25,7 +25,7 @@ public static class SpatialCompetitionDiagnostics
         double smallRadius=OccupancyShape.FromBody(small).HorizontalRadius;
         double largeRadius=OccupancyShape.FromBody(large).HorizontalRadius;
         OccupancyShape shape=OccupancyShape.FromBody(small);
-        SpatialOccupancyIndex index=new(2.8f);
+        SpatialOccupancyIndex index=new(2.8f,512f);
         index.Upsert(new(1,new Vector2(10,10),2,shape));
         bool depthSeparates=!index.CanPlace(new Vector2(10,10),2,shape)&&
             index.CanPlace(new Vector2(10,10),2+shape.VerticalHalfExtent*2.1f,shape);
@@ -67,8 +67,12 @@ public static class SpatialCompetitionDiagnostics
         double radius=world.Organisms.Sum(organism=>OccupancyShape.FromBody(organism.Body).HorizontalRadius)*0.5;
         float depth=world.Organisms[0].Depth;
         Vector2 center=new(256,256);
-        world.RelocateForMediumDiagnostic(world.Organisms[0].Id,center-new Vector2((float)(radius*0.99),0),depth,0.0);
-        world.RelocateForMediumDiagnostic(world.Organisms[1].Id,center+new Vector2((float)(radius*0.99),0),depth,Math.PI);
+        world.RelocateForMediumDiagnostic(world.Organisms[0].Id,
+            SphericalWorld.OffsetPosition(center,new Vector2((float)(-radius*0.99),0),config.WorldSize),
+            depth,0.0);
+        world.RelocateForMediumDiagnostic(world.Organisms[1].Id,
+            SphericalWorld.OffsetPosition(center,new Vector2((float)(radius*0.99),0),config.WorldSize),
+            depth,Math.PI);
         double pressure=0.0,energy=0.0;int neighbors=0,contestingFrames=0;
         for(int step=0;step<20;step++)
         {
@@ -82,7 +86,7 @@ public static class SpatialCompetitionDiagnostics
         Organism second=world.Organisms.Single(organism=>organism.Id==2);
         OccupancyShape firstShape=OccupancyShape.FromBody(first.Body);
         OccupancyShape secondShape=OccupancyShape.FromBody(second.Body);
-        double normalized=Vector2.Distance(first.Position,second.Position)/
+        double normalized=SphericalWorld.Distance(first.Position,second.Position,config.WorldSize)/
             (firstShape.HorizontalRadius+secondShape.HorizontalRadius);
         return new(normalized,pressure,energy,neighbors,contestingFrames);
     }
@@ -110,6 +114,7 @@ public static class SpatialCompetitionDiagnostics
         SimulationConfig config=new()
         {
             WorldSize=8,EnvironmentGridSize=8,TerrainElevationOffset=-100,
+            MinimumAquaticSpawnDepth=0.5f,PreferredAquaticSpawnMaximumDepth=1.8f,
             MaxPopulation=256,MaturityAgeSeconds=1.0,GrowthMatterPerSecond=4.0,
             ReproductionEnergyThreshold=new SimulationConfig().ReproductionEnergyCost,ReproductionCooldownSeconds=4.0,
             ReproductionBlockedRetrySeconds=0.5,NewbornOffsetRadius=0.1f,

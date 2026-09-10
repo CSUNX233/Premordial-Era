@@ -210,8 +210,11 @@ public static class FoodWebEnvironmentDiagnostics
 
     private static Vector2 PositionOf(int index, EnvironmentResourceSnapshot snapshot)
     {
-        float spacing = snapshot.WorldSize / (snapshot.GridSize - 1f);
-        return new Vector2((index % snapshot.GridSize) * spacing, (index / snapshot.GridSize) * spacing);
+        float longitudeSpacing = snapshot.WorldSize / snapshot.GridSize;
+        float colatitudeSpacing = snapshot.WorldSize / (snapshot.GridSize - 1f);
+        return new Vector2(
+            (index % snapshot.GridSize) * longitudeSpacing,
+            (index / snapshot.GridSize) * colatitudeSpacing);
     }
 
     private static double RelativeDifference(double a, double b) =>

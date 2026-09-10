@@ -7,6 +7,7 @@ namespace NativeEpoch.Godot;
 public sealed partial class Stage3Main : Node3D
 {
     private const ulong DefaultSeed = 20260908;
+    private ulong _worldSeed = DefaultSeed;
     private const double FixedDelta = 0.1;
     private const int MaximumStepsPerFrame = 512;
     private SimulationWorld _world = null!;
@@ -23,6 +24,7 @@ public sealed partial class Stage3Main : Node3D
     private bool _pausedBeforeCatalogue;
     private double _catalogueObserveElapsed, _catalogueSaveElapsed;
     private Vector3 _cameraTarget = Vector3.Zero;
+    private Basis _cameraSurfaceFrame = Basis.Identity;
     private float _cameraYaw = -0.55f;
     private float _cameraPitch = -0.82f;
     private float _cameraDistance = 410f;
@@ -40,6 +42,8 @@ public sealed partial class Stage3Main : Node3D
     private double _achievedScale;
     private int _renderedRegions;
     private ulong? _selectedId;
+    private ulong? _trackedId;
+    private Vector3 _trackingTarget;
     private ToolMode _toolMode = ToolMode.Select;
     private HeatmapMode _heatmapMode = HeatmapMode.Natural;
     private float _brushRadius = 28f;
@@ -47,7 +51,7 @@ public sealed partial class Stage3Main : Node3D
     public override void _Ready()
     {
         _synchronousDiagnostic = OS.GetCmdlineUserArgs().Contains("--stage3-profile-sync");
-        GetWindow().Title = "原生纪 · 阶段 3 低模世界观察台";
+        GetWindow().Title = "原生纪 · 微缩星球观察台";
         BuildSceneLighting();
 
         _worldRenderer = new LowPolyWorldRenderer { Name = "LowPolyWorldRenderer" };
@@ -98,6 +102,8 @@ public sealed partial class Stage3Main : Node3D
             RunStage2PerformanceProfile(300, 80);
         else if (OS.GetCmdlineUserArgs().Contains("--stage3-smoke"))
             RunHeadlessInteractionSmoke();
+        else if (OS.GetCmdlineUserArgs().Contains("--stage3-tracking-smoke"))
+            RunTrackingSmoke();
         else if (OS.GetCmdlineUserArgs().Contains("--stage3-worker-smoke"))
             RunWorkerSmoke();
         else if (OS.GetCmdlineUserArgs().Contains("--capture-stage2-world"))
@@ -106,6 +112,8 @@ public sealed partial class Stage3Main : Node3D
             CaptureFunctionCatalogue();
         else if (OS.GetCmdlineUserArgs().Contains("--capture-food-web"))
             CaptureFoodWeb();
+        else if (OS.GetCmdlineUserArgs().Contains("--capture-planet"))
+            CapturePlanet();
     }
 
     public override void _Process(double delta)
@@ -141,6 +149,7 @@ public sealed partial class Stage3Main : Node3D
                 _poseInterpolationElapsed = 0.0;
             }
         }
+        UpdateTrackingCamera(delta);
         _worldRenderer.InterpolateContinuousSkins(
             (float)Math.Clamp(_poseInterpolationElapsed / renderInterval, 0.0, 1.0));
 
@@ -241,8 +250,13 @@ public sealed partial class Stage3Main : Node3D
         }
         else if (inputEvent is InputEventMouseMotion motion && _rightDragging)
         {
-            _cameraYaw -= motion.Relative.X * 0.006f;
-            _cameraPitch = Math.Clamp(_cameraPitch - (motion.Relative.Y * 0.006f), -1.42f, -0.12f);
+            if (CameraOverviewWeight > 0.5f)
+                OrbitGlobe(motion.Relative);
+            else
+            {
+                _cameraYaw -= motion.Relative.X * 0.006f;
+                _cameraPitch = Math.Clamp(_cameraPitch - (motion.Relative.Y * 0.006f), -1.42f, -0.12f);
+            }
             UpdateCameraTransform();
             GetViewport().SetInputAsHandled();
         }
@@ -260,7 +274,7 @@ public sealed partial class Stage3Main : Node3D
             }
             else if (mouseButton.Pressed && mouseButton.ButtonIndex == MouseButton.WheelDown)
             {
-                _cameraDistance = Math.Min(900f, _cameraDistance * 1.18f);
+                _cameraDistance = Math.Min(PlanetProjection.Radius(_world.Config.WorldSize) * 6f, _cameraDistance * 1.18f);
                 UpdateCameraTransform();
             }
             else if (mouseButton.Pressed && mouseButton.ButtonIndex == MouseButton.Left)
@@ -313,11 +327,19 @@ public sealed partial class Stage3Main : Node3D
 
     private void ConnectHudCommands()
     {
+        _hud.RandomIndividualRequested += SelectRandomIndividual;
         _hud.PauseRequested += TogglePause;
         _hud.StepRequested += SingleStep;
         _hud.SpeedRequested += SetSpeed;
         _hud.SmallWorldRequested += () => ResetWorld(24, 0, "少量祖先 24");
         _hud.ObservationWorldRequested += () => ResetWorld(300, 80, "观察负载 300（真实预演 8 秒）");
+        _hud.SeedWorldRequested += seed =>
+        {
+            _worldSeed = seed;
+            _cameraTarget = Vector3.Zero;
+            _cameraDistance = 440f;
+            ResetWorld(24, 0, $"随机地形 · 种子 {seed}");
+        };
         _hud.SelectToolRequested += () => SetTool(ToolMode.Select);
         _hud.MineralToolRequested += () => SetTool(ToolMode.Minerals);
         _hud.TemperatureToolRequested += () => SetTool(ToolMode.Temperature);
@@ -329,6 +351,7 @@ public sealed partial class Stage3Main : Node3D
 
     private void ResetWorld(int ancestors, int preRunSteps, string label)
     {
+        StopTracking();
         CompleteSimulationBatch(wait: true);
         _simulationFaulted = false;
         _catalogue.Save();
@@ -342,7 +365,8 @@ public sealed partial class Stage3Main : Node3D
             InitialMineralScale = 1.0,
             ResourceBudgetReferenceAncestors = 24
         };
-        _world = new SimulationWorld(config, DefaultSeed, ancestors);
+        _world = new SimulationWorld(config, _worldSeed, ancestors);
+        _hud.SetSeed(_worldSeed);
         _observationTerrain = new ObservationTerrain(_world.Environment, config);
         if (preRunSteps > 0)
             _world.Run(preRunSteps);
@@ -351,6 +375,9 @@ public sealed partial class Stage3Main : Node3D
         _heatmapMode = HeatmapMode.Natural;
         _resourceRenderAccumulator = 1;
         _worldRenderer.BuildEnvironment(_world.Environment, config.WorldSize, _heatmapMode);
+        if (_cameraTarget.LengthSquared() < 1f)
+            SetCameraAnchor(new NumericsVector2(config.WorldSize * 0.5f, config.WorldSize * 0.5f), 0f);
+        UpdateCameraTransform();
         RefreshSnapshotAndWorld();
         RefreshStatistics();
         RefreshInspector();
@@ -465,7 +492,7 @@ public sealed partial class Stage3Main : Node3D
 
     private void RecordFunction(OrganismPresentationState organism, string key, string name,
         string evidence, string guidance) => _catalogue.Observe(key, name, evidence, guidance,
-            DefaultSeed, _snapshot.Statistics.SimulatedSeconds, organism.Generation,
+            _worldSeed, _snapshot.Statistics.SimulatedSeconds, organism.Generation,
             organism.Id, organism.GenomeFingerprint);
 
     private void TogglePause()
@@ -558,14 +585,15 @@ public sealed partial class Stage3Main : Node3D
                 landSamples.Add(candidate);
             else waterSamples.Add(candidate);
         }
-        float bestClearance = -1;
+        double bestClearance = -1;
+        System.Numerics.Vector3[] waterDirections = waterSamples.Select(position =>
+            SphericalWorld.ToUnit(position, _world.Config.WorldSize)).ToArray();
         foreach (NumericsVector2 candidate in landSamples)
         {
-            float edge = Math.Min(Math.Min(candidate.X, candidate.Y),
-                Math.Min(_world.Config.WorldSize - candidate.X, _world.Config.WorldSize - candidate.Y));
-            float clearance = edge * edge;
-            foreach (NumericsVector2 water in waterSamples)
-                clearance = Math.Min(clearance, NumericsVector2.DistanceSquared(candidate, water));
+            System.Numerics.Vector3 direction = SphericalWorld.ToUnit(candidate, _world.Config.WorldSize);
+            double clearance = double.MaxValue;
+            foreach (System.Numerics.Vector3 water in waterDirections)
+                clearance = Math.Min(clearance, System.Numerics.Vector3.DistanceSquared(direction, water));
             if (clearance > bestClearance) { bestClearance = clearance; land = candidate; }
         }
         if (land is null || !_world.RelocateForMediumDiagnostic(_selectedId.Value, land.Value, 0))
@@ -581,15 +609,71 @@ public sealed partial class Stage3Main : Node3D
         _hud.UpdateStatus($"人工诊断：已移至内陆 ({land.Value.X:F0}, {land.Value.Y:F0})。观察含水、摄氧和移动；资源丰富仍需具备陆地生存能力。");
     }
 
+    private void SelectRandomIndividual()
+    {
+        if (_snapshot.Organisms.Count == 0)
+        {
+            StopTracking();
+            _hud.UpdateStatus("目前没有存活个体可定位。");
+            return;
+        }
+        // Presentation RNG must never consume the simulation's random streams.
+        SelectAndFocus(_snapshot.Organisms[Random.Shared.Next(_snapshot.Organisms.Count)].Id);
+    }
+
+    private void StartTracking(OrganismPresentationState organism)
+    {
+        _trackedId = organism.Id;
+        _trackingTarget = PlanetProjection.MapToWorld(organism.Position,
+            LowPolyWorldRenderer.OrganismElevation(organism), _world.Config.WorldSize);
+        _hud.SetTracking(_trackedId);
+    }
+
+    private void StopTracking()
+    {
+        if (_trackedId is null) return;
+        _trackedId = null;
+        _hud.SetTracking(null);
+    }
+
+    private void RefreshTrackingTarget()
+    {
+        if (_trackedId is null) return;
+        foreach (OrganismPresentationState organism in _snapshot.Organisms)
+        {
+            if (organism.Id != _trackedId.Value) continue;
+            _trackingTarget = PlanetProjection.MapToWorld(organism.Position,
+                LowPolyWorldRenderer.OrganismElevation(organism), _world.Config.WorldSize);
+            return;
+        }
+        StopTracking();
+        _hud.UpdateStatus("追踪个体已死亡，已恢复自由视角。");
+    }
+
+    private void UpdateTrackingCamera(double delta)
+    {
+        if (_trackedId is null) return;
+        if (_cameraDistance >= PlanetProjection.Radius(_world.Config.WorldSize) * 1.6f)
+        {
+            StopTracking();
+            return;
+        }
+        float blend = (float)(1.0 - Math.Exp(-12.0 * delta));
+        Vector3 normal = _cameraTarget.Normalized().Lerp(_trackingTarget.Normalized(), blend).Normalized();
+        _cameraTarget = normal * Mathf.Lerp(_cameraTarget.Length(), _trackingTarget.Length(), blend);
+        TransportCameraFrame(normal);
+        UpdateCameraTransform();
+    }
+
     private void SelectAndFocus(ulong organismId)
     {
         foreach (OrganismPresentationState organism in _snapshot.Organisms)
         {
             if (organism.Id != organismId) continue;
-            _cameraTarget = new Vector3(
-                organism.Position.X - (_world.Config.WorldSize * 0.5f),
-                LowPolyWorldRenderer.OrganismElevation(organism),
-                organism.Position.Y - (_world.Config.WorldSize * 0.5f));
+            _selectedId = organismId;
+            StartTracking(organism);
+            _hud.RevealInspector();
+            SetCameraAnchor(organism.Position, LowPolyWorldRenderer.OrganismElevation(organism));
             _cameraDistance = Math.Min(_cameraDistance, 18f);
             UpdateCameraTransform();
             RefreshInspector();
@@ -604,31 +688,29 @@ public sealed partial class Stage3Main : Node3D
         float nearestDistance = maximumScreenDistance;
         foreach (OrganismPresentationState organism in _snapshot.Organisms)
         {
-            Vector3 worldPosition = new(
-                organism.Position.X - (_world.Config.WorldSize * 0.5f),
-                LowPolyWorldRenderer.OrganismElevation(organism),
-                organism.Position.Y - (_world.Config.WorldSize * 0.5f));
+            Vector3 worldPosition = PlanetProjection.MapToWorld(organism.Position,
+                LowPolyWorldRenderer.OrganismElevation(organism), _world.Config.WorldSize);
             if (_camera.IsPositionBehind(worldPosition))
                 continue;
             Vector2 organismScreen = _camera.UnprojectPosition(worldPosition);
             float distance = organismScreen.DistanceTo(screenPosition);
             if (distance < nearestDistance)
             {
+                Vector3 toOrganism = worldPosition - _camera.GlobalPosition;
+                if (TrySurfaceRay(_camera.GlobalPosition, toOrganism.Normalized(), false, out Vector3 surfaceHit) &&
+                    surfaceHit.DistanceTo(_camera.GlobalPosition) + (float)organism.Body.BoundingRadius * 2f < toOrganism.Length())
+                    continue;
                 nearest = organism;
                 nearestDistance = distance;
             }
         }
 
-        _selectedId = nearest?.Id;
         if (nearest is not null)
+            SelectAndFocus(nearest.Value.Id);
+        else
         {
-            OrganismPresentationState organism = nearest.Value;
-            _cameraTarget = new Vector3(
-                organism.Position.X - (_world.Config.WorldSize * 0.5f),
-                LowPolyWorldRenderer.OrganismElevation(organism),
-                organism.Position.Y - (_world.Config.WorldSize * 0.5f));
-            _cameraDistance = Math.Min(_cameraDistance, 18f);
-            UpdateCameraTransform();
+            _selectedId = null;
+            StopTracking();
         }
         RefreshSnapshotAndWorld();
         RefreshInspector();
@@ -641,16 +723,15 @@ public sealed partial class Stage3Main : Node3D
     {
         if (!CompleteSimulationBatch(wait: false)) return false;
         _snapshot = _world.CapturePresentationSnapshot();
+        RefreshTrackingTarget();
         if (_snapshot.Resources is not null && _resourceRenderAccumulator >= 0.5)
         {
             _worldRenderer.UpdateResources(_snapshot.Resources,
-                new System.Numerics.Vector2(_cameraTarget.X+_world.Config.WorldSize*0.5f,
-                    _cameraTarget.Z+_world.Config.WorldSize*0.5f), _heatmapMode == HeatmapMode.Natural);
+                CameraMapPosition, _heatmapMode == HeatmapMode.Natural);
             _resourceRenderAccumulator = 0;
         }
         _renderedRegions = _worldRenderer.UpdateOrganisms(_snapshot, _selectedId,
-            new System.Numerics.Vector2(_cameraTarget.X + _world.Config.WorldSize*0.5f,
-                _cameraTarget.Z + _world.Config.WorldSize*0.5f));
+            CameraMapPosition);
         if (_selectedId is not null && !_snapshot.Organisms.Any(organism => organism.Id == _selectedId.Value))
             _selectedId = null;
         return true;
@@ -676,7 +757,8 @@ public sealed partial class Stage3Main : Node3D
             $"基因组 {stats.GenomeCount:N0} · 身体区域 {stats.TotalBodyRegions:N0}（渲染实例 {_renderedRegions:N0}" +
             $"{(_worldRenderer.UsesSimplifiedProxies ? "，远景代理" : "，完整区域")}） · " +
             $"均速 {stats.AverageSpeed:F2} · 目标 {_timeScale:0}× / 实际 {_achievedScale:0.0}× · " +
-            $"物质误差 {stats.MatterError:E2}");
+            $"物质误差 {stats.MatterError:E2}",
+            $"生命 {stats.Population:N0}     第 {livingGeneration} 代     {stats.SimulatedSeconds:F0} 秒     {_timeScale:0}×");
     }
 
     private void RefreshInspector()
@@ -748,13 +830,21 @@ public sealed partial class Stage3Main : Node3D
             $"残骸/废物 {organism.Environment.Detritus:F3}/{organism.Environment.MetabolicWaste:F3}\n" +
             $"速度 ({organism.Velocity.X:F2}, {organism.Velocity.Y:F2}) · 局部反力 ({organism.LocalActuationForce.X:F3}, {organism.LocalActuationForce.Y:F3}) · 力矩 {organism.ActuationTorque:F3}\n" +
             $"控制输出 收缩 {organism.ControllerOutputs.ContractionActivation:F2} / 通透 {organism.ControllerOutputs.PermeabilityGate:F2} / 分泌 {organism.ControllerOutputs.SecretionActivation:F2}\n" +
-            "身体形变与活性表面驱动均消耗局部能量；低能量时减少探索。");
+            "身体形变与活性表面驱动均消耗局部能量；低能量时减少探索。",
+            $"个体 #{organism.Id}    第 {organism.Generation} 代\n\n" +
+            $"{(organism.Maturity >= 0.95 ? "已成年" : "正在成长")} · 年龄 {organism.AgeSeconds:F0} 秒\n" +
+            $"{(organism.Immersion >= 0.8 ? "水生环境" : organism.Immersion > 0.05 ? "水陆交界" : "陆地环境")} · 深度 {organism.Depth:F1}\n\n" +
+            $"能量  {organism.Energy:F2}\n有机储备  {organism.StoredMatter:F2}\n" +
+            $"身体区域  {organism.Regions.Count}\n" +
+            $"{(organism.ParentId == 0 ? "初始祖先" : $"出生突变  {organism.BirthMutationCount} 次")}\n\n" +
+            $"{(organism.PredationLastStep > 0 ? "正在捕食" : organism.OrganicFeedingLastStep > 0 ? "正在摄食" : organism.ExplorationDrive > 0.05 ? "探索环境" : "低活动状态")}",
+            organism.Maturity, organism.Energy / _world.Config.MaximumEnergy);
     }
 
     private void UpdateModeLabel()
     {
         string state = _paused ? "已暂停" : $"运行 {_timeScale:0}×";
-        _hud.UpdateMode($"{state} · 固定步 0.1 秒 · 图层 {HeatmapName(_heatmapMode)}");
+        _hud.UpdateMode($"{state} · {HeatmapName(_heatmapMode)}");
     }
 
     private void UpdateToolStatus()
@@ -770,6 +860,7 @@ public sealed partial class Stage3Main : Node3D
 
     private void UpdateCameraMovement(double delta)
     {
+        if (GetViewport().GuiGetFocusOwner() is LineEdit) return;
         Vector3 movement = GetCameraMovement(
             Input.IsKeyPressed(Key.W),
             Input.IsKeyPressed(Key.S),
@@ -778,10 +869,26 @@ public sealed partial class Stage3Main : Node3D
         ApplyCameraMovement(movement, delta);
     }
 
+    private NumericsVector2 CameraMapPosition =>
+        PlanetProjection.WorldToMap(_cameraTarget, _world.Config.WorldSize);
+
+    private float CameraOverviewWeight => Math.Clamp(
+        (_cameraDistance / PlanetProjection.Radius(_world.Config.WorldSize) - 0.4f) / 0.9f, 0f, 1f);
+
+    private void SetCameraAnchor(NumericsVector2 position, float elevation)
+    {
+        _cameraTarget = PlanetProjection.MapToWorld(position, elevation, _world.Config.WorldSize);
+        _cameraSurfaceFrame = PlanetProjection.BasisAt(position, _world.Config.WorldSize);
+    }
+
     private Vector3 GetCameraMovement(bool w, bool s, bool a, bool d)
     {
-        Vector3 forward = new(-MathF.Sin(_cameraYaw), 0f, -MathF.Cos(_cameraYaw));
-        Vector3 right = new(-forward.Z, 0f, forward.X);
+        Vector3 normal = _cameraTarget.Normalized();
+        Vector3 forward = -_camera.GlobalBasis.Z;
+        forward -= normal * forward.Dot(normal);
+        if (forward.LengthSquared() < 1e-5f) forward = -_cameraSurfaceFrame.Z;
+        forward = forward.Normalized();
+        Vector3 right = forward.Cross(normal).Normalized();
         Vector3 movement = Vector3.Zero;
         if (w) movement += forward;
         if (s) movement -= forward;
@@ -790,74 +897,119 @@ public sealed partial class Stage3Main : Node3D
         return movement;
     }
 
+    private void TransportCameraFrame(Vector3 normal)
+    {
+        Vector3 east = _cameraSurfaceFrame.X - normal * _cameraSurfaceFrame.X.Dot(normal);
+        if (east.LengthSquared() < 1e-6f)
+            east = PlanetProjection.BasisAt(CameraMapPosition, _world.Config.WorldSize).X;
+        east = east.Normalized();
+        _cameraSurfaceFrame = new Basis(east, normal, east.Cross(normal).Normalized());
+    }
+
     private void ApplyCameraMovement(Vector3 movement, double delta)
     {
-        if (movement.LengthSquared() <= 0f)
-            return;
-
-        float speed = (float)(delta * Math.Max(2.0, _cameraDistance * 0.32));
-        _cameraTarget += movement.Normalized() * speed;
-        float extent = _world.Config.WorldSize * 0.52f;
-        _cameraTarget.X = Math.Clamp(_cameraTarget.X, -extent, extent);
-        _cameraTarget.Z = Math.Clamp(_cameraTarget.Z, -extent, extent);
+        if (movement.LengthSquared() <= 0f) return;
+        StopTracking();
+        Vector3 normal = _cameraTarget.Normalized();
+        float metres = (float)(delta * Math.Max(2.0, _cameraDistance * 0.32));
+        float angle = metres / PlanetProjection.Radius(_world.Config.WorldSize);
+        Vector3 nextNormal = (normal * MathF.Cos(angle) + movement.Normalized() * MathF.Sin(angle)).Normalized();
+        _cameraTarget = nextNormal * _cameraTarget.Length();
+        TransportCameraFrame(nextNormal);
         UpdateCameraTargetHeight();
         UpdateCameraTransform();
     }
 
+    private void OrbitGlobe(Vector2 drag)
+    {
+        Basis rotation = new Basis(_camera.GlobalBasis.Y, -drag.X * 0.006f) *
+            new Basis(_camera.GlobalBasis.X, -drag.Y * 0.006f);
+        _cameraTarget = rotation * _cameraTarget;
+        _cameraSurfaceFrame = rotation * _cameraSurfaceFrame;
+        UpdateCameraTargetHeight();
+    }
+
     private void UpdateCameraTransform()
     {
+        if (_cameraTarget.LengthSquared() < 1f)
+            SetCameraAnchor(new NumericsVector2(_world.Config.WorldSize * 0.5f), 0f);
         float horizontal = _cameraDistance * MathF.Cos(_cameraPitch);
-        Vector3 offset = new(
+        Vector3 offset = _cameraSurfaceFrame * new Vector3(
             horizontal * MathF.Sin(_cameraYaw),
             -_cameraDistance * MathF.Sin(_cameraPitch),
             horizontal * MathF.Cos(_cameraYaw));
-        _camera.Position = _cameraTarget + offset;
-        _camera.LookAt(_cameraTarget, Vector3.Up);
+        float overview = CameraOverviewWeight;
+        Vector3 normal = _cameraTarget.Normalized();
+        float radius = PlanetProjection.Radius(_world.Config.WorldSize);
+        _camera.Position = (_cameraTarget + offset).Lerp(normal * (radius + _cameraDistance), overview);
+        // Prevent the near camera from entering solid terrain; water is traversable.
+        NumericsVector2 cameraMap = PlanetProjection.WorldToMap(_camera.Position, _world.Config.WorldSize);
+        float minimumRadius = Math.Max(1f, radius + (float)_observationTerrain.Height(cameraMap) + 0.3f);
+        if (_camera.Position.Length() < minimumRadius)
+            _camera.Position = _camera.Position.Normalized() * minimumRadius;
+        Vector3 target = _cameraTarget.Lerp(Vector3.Zero, overview);
+        Vector3 up = _cameraSurfaceFrame.Y.Lerp(-_cameraSurfaceFrame.Z, overview).Normalized();
+        // Leave room for the top HUD while keeping the whole globe visible.
+        target += up * (radius * 0.15f * overview);
+        if (Math.Abs((_camera.Position - target).Normalized().Dot(up)) > 0.999f)
+            up = _cameraSurfaceFrame.X;
+        _camera.LookAt(target, up);
     }
 
     private bool TryGetWorldPoint(Vector2 screenPosition, out NumericsVector2 worldPoint)
     {
-        Vector3 origin = _camera.ProjectRayOrigin(screenPosition);
-        Vector3 direction = _camera.ProjectRayNormal(screenPosition);
-        if (Math.Abs(direction.Y) < 1e-6f)
+        if (TrySurfaceRay(_camera.ProjectRayOrigin(screenPosition),
+            _camera.ProjectRayNormal(screenPosition), includeWater: true, out Vector3 hit))
         {
-            worldPoint = default;
-            return false;
+            worldPoint = PlanetProjection.WorldToMap(hit, _world.Config.WorldSize);
+            return true;
         }
+        worldPoint = default;
+        return false;
+    }
 
-        float distance = -origin.Y / direction.Y;
-        if (distance <= 0f)
+    private bool TrySurfaceRay(Vector3 origin, Vector3 direction, bool includeWater, out Vector3 hit)
+    {
+        hit = default;
+        float radius = PlanetProjection.Radius(_world.Config.WorldSize);
+        float outerRadius = radius + Math.Max((float)_observationTerrain.MaximumHeight,
+            (float)_observationTerrain.WaterSurface) + 1f;
+        float b = origin.Dot(direction);
+        float discriminant = b * b - origin.LengthSquared() + outerRadius * outerRadius;
+        if (discriminant < 0f) return false;
+        float root = MathF.Sqrt(discriminant);
+        float start = Math.Max(0f, -b - root), end = -b + root;
+        if (end <= start) return false;
+        bool pickWater = includeWater && origin.Length() >= radius + _observationTerrain.WaterSurface;
+        float SurfaceDistance(float distance)
         {
-            worldPoint = default;
-            return false;
+            Vector3 point = origin + direction * distance;
+            NumericsVector2 map = PlanetProjection.WorldToMap(point, _world.Config.WorldSize);
+            double height = _observationTerrain.Height(map);
+            if (pickWater) height = Math.Max(height, _observationTerrain.WaterSurface);
+            return point.Length() - radius - (float)height;
         }
-
-        float half = _world.Config.WorldSize * 0.5f;
-        Vector3 hit = origin + (direction * distance);
-        for (int iteration = 0; iteration < 4; iteration++)
+        float previous = start;
+        float previousDistance = SurfaceDistance(start);
+        for (int step = 1; step <= 128; step++)
         {
-            float sampleX = hit.X + half;
-            float sampleY = hit.Z + half;
-            if (sampleX < 0f || sampleX > _world.Config.WorldSize ||
-                sampleY < 0f || sampleY > _world.Config.WorldSize)
-                break;
-            double terrainHeight = _observationTerrain.Height(new NumericsVector2(sampleX, sampleY));
-            distance = ((float)terrainHeight - origin.Y) / direction.Y;
-            if (distance <= 0f)
-                break;
-            hit = origin + (direction * distance);
+            float current = Mathf.Lerp(start, end, step / 128f);
+            float distance = SurfaceDistance(current);
+            if (previousDistance >= 0f && distance <= 0f)
+            {
+                float lo = previous, hi = current;
+                for (int iteration = 0; iteration < 12; iteration++)
+                {
+                    float mid = (lo + hi) * 0.5f;
+                    if (SurfaceDistance(mid) > 0f) lo = mid; else hi = mid;
+                }
+                hit = origin + direction * ((lo + hi) * 0.5f);
+                return true;
+            }
+            previous = current;
+            previousDistance = distance;
         }
-        float worldX = hit.X + half;
-        float worldY = hit.Z + half;
-        if (worldX < 0f || worldX > _world.Config.WorldSize ||
-            worldY < 0f || worldY > _world.Config.WorldSize)
-        {
-            worldPoint = default;
-            return false;
-        }
-
-        worldPoint = new NumericsVector2(worldX, worldY);
-        return true;
+        return false;
     }
 
     private float GetMinimumCameraDistance()
@@ -875,12 +1027,9 @@ public sealed partial class Stage3Main : Node3D
 
     private void UpdateCameraTargetHeight()
     {
-        float half = _world.Config.WorldSize * 0.5f;
-        float worldX = Math.Clamp(_cameraTarget.X + half, 0f, _world.Config.WorldSize);
-        float worldY = Math.Clamp(_cameraTarget.Z + half, 0f, _world.Config.WorldSize);
-        double height = _observationTerrain.Height(new NumericsVector2(worldX, worldY));
-        _cameraTarget.Y = height < _observationTerrain.WaterSurface
-            ? (float)_observationTerrain.WaterSurface : (float)height + 0.5f;
+        NumericsVector2 map = CameraMapPosition;
+        float height = (float)Math.Max(_observationTerrain.Height(map), _observationTerrain.WaterSurface);
+        _cameraTarget = PlanetProjection.MapToWorld(map, height + 0.5f, _world.Config.WorldSize);
     }
 
     private void ToggleFullscreen()
@@ -899,25 +1048,71 @@ public sealed partial class Stage3Main : Node3D
         DirectionalLight3D sun = new()
         {
             RotationDegrees = new Vector3(-58f, -32f, 0f),
-            LightColor = new Color("e8f2de"),
-            LightEnergy = 1.25f,
+            LightColor = new Color("fff0d4"),
+            LightEnergy = 1.15f,
             ShadowEnabled = true
         };
         AddChild(sun);
+        AddChild(new DirectionalLight3D
+        {
+            RotationDegrees = new Vector3(28f, 140f, 0f),
+            LightColor = new Color("b6d3e7"),
+            LightEnergy = 0.70f,
+            ShadowEnabled = false
+        });
 
         WorldEnvironment worldEnvironment = new()
         {
             Environment = new global::Godot.Environment
             {
                 BackgroundMode = global::Godot.Environment.BGMode.Color,
-                BackgroundColor = new Color("081018"),
+                BackgroundColor = new Color("07111e"),
                 AmbientLightSource = global::Godot.Environment.AmbientSource.Color,
-                AmbientLightColor = new Color("9ac5bf"),
-                AmbientLightEnergy = 0.62f,
+                AmbientLightColor = new Color("c0d3df"),
+                AmbientLightEnergy = 0.70f,
                 TonemapMode = global::Godot.Environment.ToneMapper.Filmic
             }
         };
         AddChild(worldEnvironment);
+    }
+
+    private void RunTrackingSmoke()
+    {
+        CompleteSimulationBatch(wait: true);
+        _paused = true;
+        _world.Run(100);
+        RefreshSnapshotAndWorld();
+        ulong before = _world.CaptureSnapshot().StateFingerprint;
+        SelectRandomIndividual();
+        bool random = _trackedId.HasValue && _selectedId == _trackedId && _world.CaptureSnapshot().StateFingerprint == before;
+        ulong id = _trackedId!.Value;
+        Organism target = _world.Organisms.First(o => o.Id == id);
+        NumericsVector2 next = SphericalWorld.OffsetPosition(target.Position, new NumericsVector2(1, 0), _world.Config.WorldSize);
+        _world.RelocateForMediumDiagnostic(id, next, target.Depth);
+        RefreshSnapshotAndWorld();
+        UpdateTrackingCamera(1.0);
+        bool follows = _cameraTarget.DistanceTo(_trackingTarget) < 0.01f;
+        StopTracking();
+        SelectNearest(_camera.UnprojectPosition(_trackingTarget));
+        bool mapSelect = _trackedId.HasValue && _trackedId == _selectedId;
+        _cameraDistance = PlanetProjection.Radius(_world.Config.WorldSize) * 1.61f;
+        UpdateTrackingCamera(0.1);
+        bool zoomStops = _trackedId is null;
+        _cameraDistance = 18f;
+        UpdateTrackingCamera(0.1);
+        bool noRestart = _trackedId is null;
+        SelectAndFocus(id);
+        for (int step = 0; step < 10 && _world.Organisms.Any(o => o.Id == id); step++)
+        {
+            Organism victim = _world.Organisms.First(o => o.Id == id);
+            foreach (BodyRegion region in victim.Body.Regions.ToArray()) victim.Body.AddDamage(region.RegionId, 1);
+            _world.Step();
+        }
+        RefreshSnapshotAndWorld();
+        bool deathStops = !_world.Organisms.Any(o => o.Id == id) && _trackedId is null;
+        bool passed = random && follows && mapSelect && zoomStops && noRestart && deathStops;
+        GD.Print($"TRACKING_SMOKE {(passed ? "PASS" : "FAIL")} random={random} follows={follows} map_select={mapSelect} zoom_stops={zoomStops} no_restart={noRestart} death_stops={deathStops}");
+        GetTree().Quit(passed ? 0 : 1);
     }
 
     private async void RunWorkerSmoke()
@@ -931,7 +1126,7 @@ public sealed partial class Stage3Main : Node3D
         CompleteSimulationBatch(wait: true);
         RefreshSnapshotAndWorld();
         long steps = _world.StepIndex;
-        SimulationWorld reference = new(_world.Config, DefaultSeed, 24);
+        SimulationWorld reference = new(_world.Config, _worldSeed, 24);
         reference.Run((int)steps);
         bool deterministic = steps >= 60 &&
             reference.CaptureSnapshot().StateFingerprint == _world.CaptureSnapshot().StateFingerprint;
@@ -967,10 +1162,7 @@ public sealed partial class Stage3Main : Node3D
         SetTool(ToolMode.Temperature);
         ApplyBrush(new NumericsVector2(276f, 256f), -1.0);
         OrganismPresentationState targetOrganism = _snapshot.Organisms[0];
-        _cameraTarget = new Vector3(
-            targetOrganism.Position.X - (_world.Config.WorldSize * 0.5f),
-            LowPolyWorldRenderer.OrganismElevation(targetOrganism),
-            targetOrganism.Position.Y - (_world.Config.WorldSize * 0.5f));
+        SetCameraAnchor(targetOrganism.Position, LowPolyWorldRenderer.OrganismElevation(targetOrganism));
         _cameraDistance = 48f;
         UpdateCameraTransform();
         SelectNearest(_camera.UnprojectPosition(_cameraTarget));
@@ -980,8 +1172,10 @@ public sealed partial class Stage3Main : Node3D
 
         SimulationSnapshot statistics = _snapshot.Statistics;
         double tolerance = Math.Max(1e-8, Math.Abs(statistics.InitialMatter) * 1e-10);
-        Vector3 expectedForward = new(-MathF.Sin(_cameraYaw), 0f, -MathF.Cos(_cameraYaw));
-        Vector3 viewForward = (_cameraTarget - _camera.Position) * new Vector3(1f, 0f, 1f);
+        Vector3 expectedForward = _cameraSurfaceFrame * new Vector3(-MathF.Sin(_cameraYaw), 0f, -MathF.Cos(_cameraYaw));
+        Vector3 viewForward = _cameraTarget - _camera.Position;
+        Vector3 cameraNormal = _cameraTarget.Normalized();
+        viewForward -= cameraNormal * viewForward.Dot(cameraNormal);
         bool forwardAligned = viewForward.Normalized().Dot(expectedForward.Normalized()) > 0.999f;
         Vector3 beforeForward = _cameraTarget;
         ApplyCameraMovement(GetCameraMovement(w: true, s: false, a: false, d: false), 0.1);
@@ -1104,14 +1298,68 @@ public sealed partial class Stage3Main : Node3D
         GetTree().Quit(error == Error.Ok && _catalogue.Entries.Count > 0 ? 0 : 1);
     }
 
+    private async void CapturePlanet()
+    {
+        CompleteSimulationBatch(wait: true);
+        _paused = true;
+        _hud.SetPaused(true);
+        _world.Run(100);
+        SetCameraAnchor(new NumericsVector2(_world.Config.WorldSize * 0.5f), 0f);
+        float radius = PlanetProjection.Radius(_world.Config.WorldSize);
+        _cameraDistance = radius * 2.7f;
+        UpdateCameraTransform();
+        _resourceRenderAccumulator = 1;
+        RefreshSnapshotAndWorld();
+        RefreshStatistics();
+        string directory = ProjectSettings.GlobalizePath("res://artifacts");
+        DirAccess.MakeDirRecursiveAbsolute(directory);
+        async Task<Error> Save(string name)
+        {
+            for (int frame = 0; frame < 8; frame++)
+                await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            return GetViewport().GetTexture().GetImage().SavePng(System.IO.Path.Combine(directory, name));
+        }
+        Error overview = await Save("planet-overview.png");
+        bool overviewClean = _worldRenderer.ResourceCounts.Total == 0 && _worldRenderer.VisibleOrganismCount == 0;
+        bool picking = TryGetWorldPoint(_camera.UnprojectPosition(Vector3.Zero), out NumericsVector2 hitMap) &&
+            SphericalWorld.Distance(hitMap, CameraMapPosition, _world.Config.WorldSize) < 1.0;
+        Vector3 oldNormal = _cameraTarget.Normalized();
+        Vector3 behind = -oldNormal * radius;
+        Vector3 ray = (behind - _camera.Position).Normalized();
+        bool backOccluded = TrySurfaceRay(_camera.Position, ray, false, out Vector3 solid) &&
+            solid.DistanceTo(_camera.Position) + 1f < behind.DistanceTo(_camera.Position);
+        OrbitGlobe(new Vector2(MathF.PI / 0.006f, 0f));
+        UpdateCameraTransform();
+        _resourceRenderAccumulator = 1;
+        RefreshSnapshotAndWorld();
+        bool otherHemisphere = oldNormal.Dot(_cameraTarget.Normalized()) < -0.9f;
+        Error reverse = await Save("planet-farside.png");
+        OrganismPresentationState selected = _snapshot.Organisms[0];
+        _selectedId = selected.Id;
+        SetCameraAnchor(selected.Position, LowPolyWorldRenderer.OrganismElevation(selected));
+        _cameraDistance = Math.Max(5f, (float)selected.Body.BoundingRadius * 5f);
+        UpdateCameraTransform();
+        _resourceRenderAccumulator = 1;
+        RefreshSnapshotAndWorld();
+        RefreshInspector();
+        _hud.RevealInspector();
+        Error closeup = await Save("planet-closeup.png");
+        bool cameraFinite = _camera.Position.IsFinite() && _camera.GlobalBasis.IsFinite();
+        bool passed = overview == Error.Ok && reverse == Error.Ok && closeup == Error.Ok &&
+            picking && backOccluded && otherHemisphere && cameraFinite && overviewClean;
+        GD.Print($"PLANET_VIEW {(passed ? "PASS" : "FAIL")} picking={picking} back_occluded={backOccluded} " +
+            $"orbit_other_hemisphere={otherHemisphere} camera_finite={cameraFinite} overview_clean={overviewClean} radius={radius:F2}");
+        GetTree().Quit(passed ? 0 : 1);
+    }
+
     private async void CaptureFoodWeb()
     {
         CompleteSimulationBatch(wait: true);
         _paused = true;
         _hud.SetPaused(true);
         _world.Run(100);
-        _cameraTarget = Vector3.Zero;
-        _cameraDistance = 240f;
+        SetCameraAnchor(new NumericsVector2(_world.Config.WorldSize * 0.5f), 0f);
+        _cameraDistance = PlanetProjection.Radius(_world.Config.WorldSize) * 2.7f;
         UpdateCameraTransform();
         _resourceRenderAccumulator = 1;
         RefreshSnapshotAndWorld();
@@ -1123,6 +1371,11 @@ public sealed partial class Stage3Main : Node3D
         Error saved = GetViewport().GetTexture().GetImage().SavePng(
             System.IO.Path.Combine(directory, "food-web-map.png"));
         EnvironmentResourceSnapshot resources = _snapshot.Resources!;
+        bool overviewClean = _worldRenderer.ResourceCounts.Total == 0;
+        _cameraDistance = PlanetProjection.Radius(_world.Config.WorldSize) * 0.85f;
+        UpdateCameraTransform();
+        _resourceRenderAccumulator = 1;
+        RefreshSnapshotAndWorld();
         ResourceRenderCounts populated = _worldRenderer.ResourceCounts;
         int cells = resources.Minerals.Length;
         EnvironmentResourceSnapshot empty = resources with
@@ -1133,7 +1386,7 @@ public sealed partial class Stage3Main : Node3D
         ResourceRenderCounts exhausted = _worldRenderer.UpdateResources(empty);
         _worldRenderer.UpdateResources(resources);
         int geneticColors = _snapshot.Organisms.Select(o => o.Geometry.Regions[0].Color).Distinct().Count();
-        bool passed = saved == Error.Ok && populated.Minerals > 0 && populated.LandPlants > 0 &&
+        bool passed = saved == Error.Ok && overviewClean && populated.Minerals > 0 && populated.LandPlants > 0 &&
             populated.Algae > 0 && exhausted.Total == 0 && geneticColors > 1;
         GD.Print($"FOOD_WEB_RENDER {(passed ? "PASS" : "FAIL")} resources={populated} exhausted={exhausted.Total} genetic_colors={geneticColors}");
         GetTree().Quit(passed ? 0 : 1);
@@ -1145,10 +1398,7 @@ public sealed partial class Stage3Main : Node3D
         _paused = true;
         OrganismPresentationState selected = _snapshot.Organisms[0];
         _selectedId = selected.Id;
-        _cameraTarget = new Vector3(
-            selected.Position.X - (_world.Config.WorldSize * 0.5f),
-            LowPolyWorldRenderer.OrganismElevation(selected),
-            selected.Position.Y - (_world.Config.WorldSize * 0.5f));
+        SetCameraAnchor(selected.Position, LowPolyWorldRenderer.OrganismElevation(selected));
         _cameraPitch = -0.10f;
         _cameraDistance = Math.Max(2.8f, (float)selected.Body.BoundingRadius * 4.0f);
         UpdateCameraTransform();
@@ -1192,13 +1442,13 @@ public sealed partial class Stage3Main : Node3D
             categoryAllocation = GC.GetAllocatedBytesForCurrentThread();
             started = System.Diagnostics.Stopwatch.GetTimestamp();
             _snapshot = _world.CapturePresentationSnapshot();
+        RefreshTrackingTarget();
             snapshotMilliseconds += System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
             snapshotAllocated += GC.GetAllocatedBytesForCurrentThread() - categoryAllocation;
             categoryAllocation = GC.GetAllocatedBytesForCurrentThread();
             started = System.Diagnostics.Stopwatch.GetTimestamp();
             _renderedRegions = _worldRenderer.UpdateOrganisms(_snapshot, _selectedId,
-                new System.Numerics.Vector2(_cameraTarget.X + _world.Config.WorldSize * 0.5f,
-                    _cameraTarget.Z + _world.Config.WorldSize * 0.5f));
+                CameraMapPosition);
             renderMilliseconds += System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
             renderAllocated += GC.GetAllocatedBytesForCurrentThread() - categoryAllocation;
         }
@@ -1210,6 +1460,9 @@ public sealed partial class Stage3Main : Node3D
         ResetWorld(ancestors, preRunSteps, $"1× 帧采样 {ancestors}");
         OrganismPresentationState trackedStart = _snapshot.Organisms[0];
         _selectedId = trackedStart.Id;
+        SetCameraAnchor(trackedStart.Position, LowPolyWorldRenderer.OrganismElevation(trackedStart));
+        _cameraDistance = 60f;
+        UpdateCameraTransform();
         RefreshSnapshotAndWorld();
         _paused = false;
         for (int frame = 0; frame < 30; frame++)
@@ -1266,7 +1519,7 @@ public sealed partial class Stage3Main : Node3D
         double averageFrame = frameTimes.Average();
         double p95 = frameTimes[(int)(frameTimes.Count * 0.95)];
         OrganismPresentationState trackedEnd = _snapshot.Organisms.First(organism => organism.Id == trackedStart.Id);
-        double displacement = System.Numerics.Vector2.Distance(trackedStart.Position, trackedEnd.Position);
+        double displacement = SphericalWorld.Distance(trackedStart.Position, trackedEnd.Position, _world.Config.WorldSize);
         double poseDelta = trackedStart.Regions.Join(trackedEnd.Regions,
             before => before.RegionId, after => after.RegionId,
             (before, after) => System.Numerics.Vector2.Distance(before.LocalCenter, after.LocalCenter) +
@@ -1274,7 +1527,7 @@ public sealed partial class Stage3Main : Node3D
         long sampledSteps = _world.StepIndex - firstStep;
         int visibleFacing=_worldRenderer.VisibleOrganismCount;
         Vector3 towardTarget=(_cameraTarget-_camera.Position).Normalized();
-        _camera.LookAt(_camera.Position-towardTarget*100f,Vector3.Up);
+        _camera.LookAt(_camera.Position-towardTarget*100f,_camera.GlobalBasis.Y);
         RefreshSnapshotAndWorld();
         await ToSignal(GetTree(),SceneTree.SignalName.ProcessFrame);
         int visibleAway=_worldRenderer.VisibleOrganismCount;
@@ -1296,7 +1549,7 @@ public sealed partial class Stage3Main : Node3D
         if(activeId!=0)
             GD.Print($"STAGE2_ACTIVE organism={activeId} region={activeRegionId} angle_pp={activeAngleMax-activeAngleMin:F6} " +
                 $"length_pp={activeLengthMax-activeLengthMin:F6} matter_drift={activeMatterMax-activeMatterMin:F6} " +
-                $"displacement={System.Numerics.Vector2.Distance(activeStartPosition,activeEndPosition):F6} window_s=10");
+                $"displacement={SphericalWorld.Distance(activeStartPosition,activeEndPosition,_world.Config.WorldSize):F6} window_s=10");
         GetTree().Quit();
     }
 

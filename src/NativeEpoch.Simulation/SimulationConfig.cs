@@ -18,7 +18,7 @@ public sealed record SimulationConfig
     public double AncestorStoredMatter { get; init; } = 1.5;
     public double AncestorEnergy { get; init; } = 1.4;
     public double NewbornEnergy { get; init; } = 0.5;
-    public double NewbornSubstrate { get; init; } = 0.40;
+    public double NewbornSubstrate { get; init; } = 0.10;
     public double MaximumEnergy { get; init; } = 3.0;
     public double BaseStoredMatter { get; init; } = 1.0;
     public double MatterUptakePerSurfacePerSecond { get; init; } = 0.10;
@@ -51,8 +51,8 @@ public sealed record SimulationConfig
     public double ReproductionEnergyThreshold { get; init; } = 1.4;
     public double MaturityAgeSeconds { get; init; } = 22.0;
     public double ReproductionCooldownSeconds { get; init; } = 28.0;
-    public double SenescenceOnsetSeconds { get; init; } = 300.0;
-    public double SenescenceTimeScaleSeconds { get; init; } = 300.0;
+    public double SenescenceOnsetSeconds { get; init; } = 600.0;
+    public double SenescenceTimeScaleSeconds { get; init; } = 600.0;
     public double SenescenceHazardPerSecond { get; init; } = 0.003;
     public double JuvenileHazardPerSecond { get; init; } = 0.012;
     public float NewbornOffsetRadius { get; init; } = 2.5f;
