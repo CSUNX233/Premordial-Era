@@ -22,6 +22,8 @@ public sealed class SimulationWorld
     private readonly Dictionary<ulong, double> _mineralDemands = [];
     private readonly Dictionary<ulong, double> _organicDemands = [];
     private readonly Dictionary<ulong, double> _detritusDemands = [];
+    private readonly List<LightEnergyRequest> _lightRequests = [];
+    private readonly List<MineralUptakeRequest> _producerMineralCompetition = [];
     private EnvironmentResourceSnapshot? _resourcePresentation;
     private long _resourcePresentationStep = -100;
     private List<Organism> _organisms;
@@ -147,18 +149,29 @@ public sealed class SimulationWorld
         double dt = _config.FixedDeltaSeconds;
         _environment.UpdateOxygen(dt);
         _environment.UpdateMatterCycles(dt);
-        ProducerStepResult producers = _environment.UpdateProducers(dt);
+        _lightRequests.Clear();
+        _producerMineralCompetition.Clear();
+        foreach (Organism organism in _organisms)
+        {
+            Genome genome=Genomes.Get(organism.GenomeId);
+            EnvironmentSample sample = _environment.Sample(organism.Position, organism.Depth);
+            double lightRequest = sample.Light * organism.Body.Cache.PhotosyntheticSurface *
+                _config.LightEnergyPerSurfacePerSecond * dt;
+            _lightRequests.Add(new LightEnergyRequest(
+                organism.Id, organism.Position, organism.Depth, lightRequest));
+            double mineralRequest=RegionalPhysiology.EstimateMineralDemand(
+                organism.Body,genome,lightRequest,_config,dt);
+            if(mineralRequest>0.0)
+                _producerMineralCompetition.Add(new MineralUptakeRequest(
+                    organism.Id,organism.Position,mineralRequest));
+        }
+        ProducerStepResult producers = _environment.UpdateProducers(
+            dt,_producerMineralCompetition);
         CumulativeLightEnergy += producers.LightEnergyConsumed;
         CumulativeDissipatedEnergy += producers.MatterRespired * BilinearEnvironmentField.FoodWebEnergyPerMatter;
         CumulativePrimaryProduction += producers.MatterGrown;
         IReadOnlyDictionary<ulong, double> lightAllocations = _environment.AllocateLightEnergy(
-            _organisms.Select(organism =>
-            {
-                EnvironmentSample sample = _environment.Sample(organism.Position, organism.Depth);
-                double request = sample.Light * organism.Body.Cache.PhotosyntheticSurface *
-                    _config.LightEnergyPerSurfacePerSecond * dt;
-                return new LightEnergyRequest(organism.Id, organism.Position, organism.Depth, request);
-            }), dt);
+            _lightRequests, dt);
         Dictionary<ulong,double> mineralDemands=_mineralDemands;
         Dictionary<ulong,double> organicDemands=_organicDemands;
         Dictionary<ulong,double> detritusDemands=_detritusDemands;
@@ -483,7 +496,7 @@ public sealed class SimulationWorld
                     region.ExchangeExpression+region.BarrierExpression+region.ContractileExpression+
                     region.StructuralExpression+region.SensoryExpression+region.PhotosyntheticExpression+
                     region.FeedingExpression+region.DigestiveExpression+region.DecomposerExpression)/9.0):0.0,
-                ActiveSensorCount=o.ActiveSensorCount,ChemicalSensorSignal=o.ChemicalSensorSignal,
+                ActiveSensorCount=o.ActiveSensorCount,ChemicalSensorSignal=o.ChemicalSensorSignal,ChemicalSenseAccess=o.ChemicalSenseAccess,
                 ContactSensorSignal=o.ContactSensorSignal,SensingEnergyLastStep=o.SensingEnergyLastStep,
                 ActiveVisualSensorCount=o.ActiveVisualSensorCount,VisionSignal=o.VisionSignal,
                 SocialResponse=o.SocialResponse,SocialTargetId=o.SocialTargetId,
@@ -901,11 +914,11 @@ public sealed class SimulationWorld
         OccupancyShape occupancyShape=OccupancyShape.FromBody(organism.Body);
         EnvironmentSample preMoveEnvironment = _environment.Sample(organism.Position, organism.Depth);
         float supportHalfThickness=occupancyShape.VerticalHalfExtent;
-        bool groundSupported = preMoveEnvironment.WaterDepth <= 0.0 &&
-            organism.Depth <= supportHalfThickness + 1e-5f;
+        bool groundSupported = HasGroundSupport(
+            preMoveEnvironment.WaterDepth, organism.Depth, supportHalfThickness);
         BodyMechanicsResult mechanics = organism.Pose.Step(genome, organism.Body,
             organism.ControllerOutputs, organism.AgeSeconds, organism.Immersion,
-            organism.Hydration, _config, dt, false, false);
+            organism.Hydration, _config, dt, groundSupported, false);
         organism.Body.ApplyPoseGeometry(genome, organism.Pose);
         double centerElevation=preMoveEnvironment.WaterDepth>0.0
             ?preMoveEnvironment.WaterSurface-organism.Depth
@@ -961,13 +974,12 @@ public sealed class SimulationWorld
         EnvironmentSample sample = _environment.Sample(organism.Position, organism.Depth);
         if (sample.WaterDepth > 0)
         {
-            float half=Math.Min(occupancyShape.VerticalHalfExtent,(float)sample.WaterDepth*0.5f);
-            double buoyancyRatio = body.Buoyancy / Math.Max(0.1, body.PhysicalMass);
-            organism.VerticalVelocity += (float)((buoyancyRatio - 1.0) *
-                _config.BuoyancyAccelerationScale * dt);
-            organism.VerticalVelocity *= (float)Math.Exp(-_config.WaterVerticalDampingPerSecond * dt);
-            organism.Depth = Math.Clamp(organism.Depth - organism.VerticalVelocity * (float)dt,
-                half, (float)Math.Max(half, sample.WaterDepth - half));
+            VerticalMotionResult vertical=VerticalMotionMechanics.Step(organism.Body,genome,
+                organism.ControllerOutputs,ref organism.Depth,ref organism.VerticalVelocity,
+                sample.WaterDepth,occupancyShape.VerticalHalfExtent,organism.Immersion,
+                organism.Hydration,_config,dt);
+            CumulativeDissipatedEnergy+=vertical.EnergySpent;
+            CumulativeMovementEnergy+=vertical.EnergySpent;
         }
         else { organism.Depth = 0; organism.VerticalVelocity = 0; }
     }
@@ -1030,6 +1042,11 @@ public sealed class SimulationWorld
 
     public static double MediumMobility(double immersion, double hydration, double retention) =>
         Math.Clamp(immersion + ((1.0 - immersion) * 0.14 * hydration * (0.35 + 0.65 * retention)), 0.02, 1.0);
+
+    internal static bool HasGroundSupport(double waterDepth,float centerDepth,float halfThickness) =>
+        waterDepth<=0.0
+            ?centerDepth<=halfThickness+1e-5f
+            :centerDepth+halfThickness>=waterDepth-1e-5;
 
     private void ClampHorizontal(ref Organism organism)
     {

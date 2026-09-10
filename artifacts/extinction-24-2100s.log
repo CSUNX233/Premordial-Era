@@ -1,0 +1,15 @@
+ecology t=200 alive=67 gen_ever=2 born/died_interval=60/17 mature_now=30 mature_lacks_matter/energy=30/5 matured_descendants/mutants=6/6 minerals=280.42 detritus=947.06 stored=3.48 energy=91.63 matter_error=-5.639E-011
+ecology t=400 alive=69 gen_ever=2 born/died_interval=22/20 mature_now=38 mature_lacks_matter/energy=38/10 matured_descendants/mutants=14/14 minerals=162.05 detritus=1378.57 stored=4.17 energy=92.94 matter_error=-5.275E-011
+ecology t=600 alive=79 gen_ever=3 born/died_interval=30/20 mature_now=45 mature_lacks_matter/energy=45/21 matured_descendants/mutants=21/21 minerals=118.26 detritus=1752.59 stored=3.05 energy=93.20 matter_error=-5.639E-011
+ecology t=800 alive=78 gen_ever=3 born/died_interval=28/29 mature_now=48 mature_lacks_matter/energy=48/27 matured_descendants/mutants=28/28 minerals=97.43 detritus=2085.77 stored=2.63 energy=76.89 matter_error=-3.820E-011
+ecology t=1000 alive=69 gen_ever=3 born/died_interval=23/32 mature_now=43 mature_lacks_matter/energy=43/26 matured_descendants/mutants=33/33 minerals=83.33 detritus=2382.31 stored=2.45 energy=63.78 matter_error=-3.456E-011
+ecology t=1200 alive=55 gen_ever=3 born/died_interval=16/30 mature_now=33 mature_lacks_matter/energy=33/21 matured_descendants/mutants=38/38 minerals=78.17 detritus=2640.38 stored=0.99 energy=54.36 matter_error=-4.366E-011
+ecology t=1400 alive=37 gen_ever=4 born/died_interval=10/28 mature_now=24 mature_lacks_matter/energy=24/14 matured_descendants/mutants=42/42 minerals=73.51 detritus=2869.22 stored=1.21 energy=31.54 matter_error=-9.823E-011
+ecology t=1600 alive=20 gen_ever=4 born/died_interval=5/22 mature_now=13 mature_lacks_matter/energy=13/6 matured_descendants/mutants=44/44 minerals=71.02 detritus=3070.34 stored=0.56 energy=22.38 matter_error=-6.003E-011
+ecology t=1800 alive=22 gen_ever=5 born/died_interval=4/2 mature_now=16 mature_lacks_matter/energy=16/10 matured_descendants/mutants=47/47 minerals=67.42 detritus=3236.36 stored=0.80 energy=21.93 matter_error=-6.912E-011
+ecology t=2000 alive=18 gen_ever=6 born/died_interval=7/11 mature_now=13 mature_lacks_matter/energy=13/9 matured_descendants/mutants=49/49 minerals=64.78 detritus=3385.62 stored=0.45 energy=12.70 matter_error=-7.458E-011
+ecology t=2100 alive=15 gen_ever=6 born/died_interval=1/4 mature_now=11 mature_lacks_matter/energy=11/7 matured_descendants/mutants=49/49 minerals=63.52 detritus=3453.18 stored=0.53 energy=12.67 matter_error=-3.456E-011
+recent_deaths=JuvenileFailure n=150 development=0.454 energy=0.61 substrate=0.003
+recent_deaths=Senescence n=62 development=0.982 energy=0.54 substrate=0.026
+recent_deaths=AccumulatedDamage n=3 development=0.994 energy=0.00 substrate=0.000
+ECOLOGY COMPLETE survived=True gen_ever=6 ledger=True

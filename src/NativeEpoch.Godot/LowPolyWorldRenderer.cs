@@ -32,6 +32,7 @@ public sealed partial class LowPolyWorldRenderer : Node3D
     private MeshInstance3D _atmosphere = null!;
     private MultiMeshInstance3D _organisms = null!;
     private MeshInstance3D _selection = null!;
+    private MeshInstance3D _depthGuide = null!;
     private MeshInstance3D _selectedSkin = null!;
     private Skeleton3D _selectedSkeleton = null!;
     private ulong _selectedSkinKey;
@@ -99,6 +100,13 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         selectionRing.SurfaceEnd();
         _selection = new MeshInstance3D { Mesh = selectionRing, Visible = false };
         AddChild(_selection);
+        ImmediateMesh depthLine = new();
+        depthLine.SurfaceBegin(Mesh.PrimitiveType.Lines, selectionMaterial);
+        depthLine.SurfaceAddVertex(Vector3.Zero);
+        depthLine.SurfaceAddVertex(Vector3.Up);
+        depthLine.SurfaceEnd();
+        _depthGuide = new MeshInstance3D { Mesh = depthLine, Visible = false };
+        AddChild(_depthGuide);
         _selectedSkeleton = new Skeleton3D { Name = "SelectedBodySkeleton", Visible = false };
         AddChild(_selectedSkeleton);
         _selectedSkin = new MeshInstance3D { Visible = false, Skeleton = new NodePath("..") };
@@ -333,6 +341,7 @@ public sealed partial class LowPolyWorldRenderer : Node3D
     {
         _organisms.Multimesh.InstanceCount=0;
         _selection.Visible=false;
+        _depthGuide.Visible=false;
         _selectedSkin.Visible=false;
         _selectedSkeleton.Visible=false;
         foreach(NearSkinView view in _nearSkins)
@@ -634,6 +643,7 @@ public sealed partial class LowPolyWorldRenderer : Node3D
 
     private void UpdateSelection(WorldPresentationSnapshot snapshot, ulong? selectedId)
     {
+        _depthGuide.Visible = false;
         if (selectedId is null)
         {
             _selection.Visible = false;
@@ -669,6 +679,15 @@ public sealed partial class LowPolyWorldRenderer : Node3D
         _selection.Transform=new Transform3D(tangent,
             PlanetProjection.MapToWorld(organism.Position,elevation,_worldSize));
         _selection.Visible = true;
+        float depthToSurface=(float)organism.Environment.WaterSurface-OrganismElevation(organism);
+        if(organism.Environment.WaterDepth>0 && depthToSurface>0.1f)
+        {
+            _depthGuide.Transform=new Transform3D(
+                PlanetProjection.BasisAt(organism.Position,_worldSize)*
+                    Basis.FromScale(new Vector3(1,depthToSurface,1)),
+                PlanetProjection.MapToWorld(organism.Position,OrganismElevation(organism),_worldSize));
+            _depthGuide.Visible=true;
+        }
     }
 
     private static void AddTerrainTriangle(

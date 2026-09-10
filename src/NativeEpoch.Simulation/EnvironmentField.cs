@@ -53,7 +53,9 @@ public interface IMutableEnvironmentField : IEnvironmentField
     void DepositOxygen(Vector2 position, float depth, double immersion, double amount);
     void UpdateOxygen(double deltaSeconds);
     void UpdateMatterCycles(double deltaSeconds);
-    ProducerStepResult UpdateProducers(double deltaSeconds) => default;
+    ProducerStepResult UpdateProducers(
+        double deltaSeconds,
+        IEnumerable<MineralUptakeRequest>? competingMineralRequests = null) => default;
     ulong ComputeResourceFingerprint() => 0UL;
     IReadOnlyDictionary<ulong, double> AllocateLightEnergy(
         IEnumerable<LightEnergyRequest> requests,
@@ -227,6 +229,8 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
     private readonly double[] _airOxygenEquilibrium;
     private readonly double[] _lightEnergyBudget;
     private readonly double[] _producerLightClaim;
+    private readonly double[] _organismMineralDemand;
+    private readonly double[] _producerMineralBudget;
     private readonly double[] _producerDispersalDelta;
     private readonly Dictionary<ulong, MatterReservation> _activeMatterReservations = [];
     private readonly Dictionary<ulong, MineralReservation> _activeMineralReservations = [];
@@ -267,6 +271,8 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         _airOxygenEquilibrium = new double[count];
         _lightEnergyBudget = new double[count];
         _producerLightClaim = new double[count];
+        _organismMineralDemand = new double[count];
+        _producerMineralBudget = new double[count];
         _producerDispersalDelta = new double[count];
 
         double targetOceanAreaFraction = 0.70 + (0.10 * random.NextUnitDouble());
@@ -1024,7 +1030,9 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         }
     }
 
-    public ProducerStepResult UpdateProducers(double deltaSeconds)
+    public ProducerStepResult UpdateProducers(
+        double deltaSeconds,
+        IEnumerable<MineralUptakeRequest>? competingMineralRequests = null)
     {
         if (!double.IsFinite(deltaSeconds) || deltaSeconds <= 0.0)
             throw new ArgumentOutOfRangeException(nameof(deltaSeconds));
@@ -1032,6 +1040,37 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         double grown = 0.0, respired = 0.0, senesced = 0.0, lightConsumed = 0.0;
         double residual = 0.0;
         Array.Clear(_producerLightClaim);
+        Array.Clear(_organismMineralDemand);
+        if (competingMineralRequests is not null)
+            foreach (MineralUptakeRequest request in competingMineralRequests)
+            {
+                if (!double.IsFinite(request.RequestedMatter) || request.RequestedMatter < 0.0)
+                    throw new InvalidOperationException("Competing mineral requests must be finite and non-negative.");
+                if (request.RequestedMatter <= 0.0) continue;
+                int cellIndex=DominantCell(Locate(request.Position));
+                _organismMineralDemand[cellIndex] += request.RequestedMatter;
+                if(!double.IsFinite(_organismMineralDemand[cellIndex]))
+                    throw new InvalidOperationException("Competing mineral demand overflowed its cell budget.");
+            }
+        double wholeStepGrowthFraction = 1.0 - Math.Exp(-ProducerGrowthPerSecond * deltaSeconds);
+        Array.Fill(_producerMineralBudget,double.PositiveInfinity);
+        for(int index=0;index<_minerals.Length;index++)
+        {
+            double organismDemand=_organismMineralDemand[index];
+            if(organismDemand<=0.0)continue;
+            double producer=_landPlants[index]+_algae[index];
+            double capacity=_producerCapacity[index];
+            double room=Math.Max(0.0,capacity-producer);
+            double densityLimit=capacity>0.0?room/capacity:0.0;
+            double usableLightFactor=_terrain[index]>=0.0?_light[index]:NearSurfaceAlgaeLight(index);
+            double usableLight=usableLightFactor*_lightEnergyFluxPerWorldAreaPerSecond*
+                _cellAreas[index]*deltaSeconds;
+            double producerPotential=Math.Min(usableLight/FoodWebEnergyPerMatter,
+                producer*wholeStepGrowthFraction*densityLimit);
+            _producerMineralBudget[index]=producerPotential+organismDemand>0.0
+                ?_minerals[index]*producerPotential/(producerPotential+organismDemand)
+                :0.0;
+        }
         int substeps = Math.Min(64, Math.Max(1, (int)Math.Ceiling(deltaSeconds / 0.5)));
         double stepSeconds = deltaSeconds / substeps;
         double growthFraction = 1.0 - Math.Exp(-ProducerGrowthPerSecond * stepSeconds);
@@ -1055,12 +1094,15 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
                 _cellAreas[index] * stepSeconds;
             double room = Math.Max(0.0, capacity - producer);
             double densityLimit = capacity > 0.0 ? room / capacity : 0.0;
-            double growth = Math.Min(
-                Math.Min(_minerals[index], usableLight / FoodWebEnergyPerMatter),
+            double producerPotential = Math.Min(
+                usableLight / FoodWebEnergyPerMatter,
                 producer * growthFraction * densityLimit);
+            double growth = Math.Min(_minerals[index],
+                Math.Min(producerPotential, _producerMineralBudget[index]));
             if (growth > 0.0)
             {
                 _minerals[index] -= growth;
+                _producerMineralBudget[index]-=growth;
                 if (_terrain[index] >= 0.0) _landPlants[index] += growth;
                 else _algae[index] += growth;
                 double light = growth * FoodWebEnergyPerMatter;

@@ -15,6 +15,9 @@ public readonly record struct FoodWebEnvironmentDiagnosticResult(
     double ReversedOrderDifference,
     double ReservationReturnError,
     bool MineralReservationConserved,
+    double FairMineralReservation,
+    double ProducerFirstMineralReservation,
+    bool ProducerMineralCompetitionConserved,
     bool DetritusReservationConserved,
     bool ReservationReplayRejected,
     bool NeighborRecolonizationConserved,
@@ -67,6 +70,8 @@ public static class FoodWebEnvironmentDiagnostics
 
         AllocationTrial allocation = OrganicAllocationTrial(config, seed + 2, landPosition);
         bool mineralConserved = MineralReservationTrial(config, seed + 3, landPosition);
+        MineralCompetitionTrial mineralCompetition=ProducerMineralCompetitionTrial(
+            config,seed+6);
         bool detritusConserved = DetritusReservationTrial(config, seed + 4, algaePosition);
         bool recolonized = RecolonizationTrial(config, seed + 5);
 
@@ -93,6 +98,7 @@ public static class FoodWebEnvironmentDiagnostics
             consistency <= 0.10 && allocation.EqualDifference < 1e-12 &&
             allocation.ReversedDifference < 1e-12 && allocation.ReturnError < 1e-10 &&
             allocation.ReplayRejected && mineralConserved && detritusConserved &&
+            mineralCompetition.Fair && mineralCompetition.Conserved &&
             recolonized && snapshotDetached && finite && oxygenNetZero;
 
         return new FoodWebEnvironmentDiagnosticResult(
@@ -108,6 +114,9 @@ public static class FoodWebEnvironmentDiagnostics
             allocation.ReversedDifference,
             allocation.ReturnError,
             mineralConserved,
+            mineralCompetition.FairReservation,
+            mineralCompetition.ProducerFirstReservation,
+            mineralCompetition.Conserved,
             detritusConserved,
             allocation.ReplayRejected,
             recolonized,
@@ -154,6 +163,45 @@ public static class FoodWebEnvironmentDiagnostics
         MineralReservation reservation = reservations[1];
         environment.ReturnMinerals(reservation, reservation.Total);
         return Math.Abs(environment.TotalEnvironmentMatter - before) < 1e-12;
+    }
+
+    private static MineralCompetitionTrial ProducerMineralCompetitionTrial(
+        SimulationConfig config,ulong seed)
+    {
+        BilinearEnvironmentField producerFirst=Create(config,seed);
+        BilinearEnvironmentField fair=Create(config,seed);
+        EnvironmentResourceSnapshot snapshot=fair.CaptureResourceSnapshot();
+        double[] producers=new double[snapshot.LandPlants.Length];
+        for(int index=0;index<producers.Length;index++)
+            producers[index]=snapshot.LandPlants[index]+snapshot.Algae[index];
+        Vector2 position=PositionOf(IndexOfMaximum(producers),snapshot);
+        const double scarceMinerals=1e-4;
+        const double creatureDemand=1e-4;
+        foreach(BilinearEnvironmentField environment in new[]{producerFirst,fair})
+        {
+            IReadOnlyDictionary<ulong,MineralReservation> drained=environment.ReserveMinerals(
+                [new MineralUptakeRequest(99,position,double.MaxValue)]);
+            _=drained;
+            environment.DepositMinerals(position,scarceMinerals);
+        }
+        double producerFirstBefore=producerFirst.TotalEnvironmentMatter;
+        double fairBefore=fair.TotalEnvironmentMatter;
+        ProducerStepResult exclusiveGrowth=producerFirst.UpdateProducers(0.5);
+        ProducerStepResult sharedGrowth=fair.UpdateProducers(0.5,
+            [new MineralUptakeRequest(1,position,creatureDemand)]);
+        MineralReservation exclusive=producerFirst.ReserveMinerals(
+            [new MineralUptakeRequest(1,position,creatureDemand)])[1];
+        MineralReservation shared=fair.ReserveMinerals(
+            [new MineralUptakeRequest(1,position,creatureDemand)])[1];
+        producerFirst.ReturnMinerals(exclusive,exclusive.Total);
+        fair.ReturnMinerals(shared,shared.Total);
+        bool conserved=Math.Abs(producerFirst.TotalEnvironmentMatter-producerFirstBefore)<1e-10&&
+            Math.Abs(fair.TotalEnvironmentMatter-fairBefore)<1e-10&&
+            Math.Abs(exclusiveGrowth.ConservationResidual)<1e-10&&
+            Math.Abs(sharedGrowth.ConservationResidual)<1e-10;
+        bool allocationFair=shared.Total>exclusive.Total+1e-12&&
+            exclusiveGrowth.MatterGrown>sharedGrowth.MatterGrown+1e-12;
+        return new(shared.Total,exclusive.Total,allocationFair,conserved);
     }
 
     private static bool DetritusReservationTrial(
@@ -225,4 +273,10 @@ public static class FoodWebEnvironmentDiagnostics
         double ReversedDifference,
         double ReturnError,
         bool ReplayRejected);
+
+    private readonly record struct MineralCompetitionTrial(
+        double FairReservation,
+        double ProducerFirstReservation,
+        bool Fair,
+        bool Conserved);
 }

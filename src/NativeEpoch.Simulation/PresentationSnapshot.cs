@@ -64,6 +64,7 @@ public readonly record struct OrganismPresentationState(
     public double MeanTissueExpression { get; init; }
     public int ActiveSensorCount { get; init; }
     public double ChemicalSensorSignal { get; init; }
+    public double ChemicalSenseAccess { get; init; }
     public double ContactSensorSignal { get; init; }
     public double SensingEnergyLastStep { get; init; }
     public int ActiveVisualSensorCount { get; init; }

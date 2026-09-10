@@ -10,6 +10,7 @@ public readonly record struct MechanicsDiagnosticResult(
 {
     public double UnpoweredSurfaceDisplacement { get; init; }
     public bool PositiveSphereSections { get; init; }
+    public bool GroundSupportClassification { get; init; }
 }
 
 public static class MechanicsDiagnostics
@@ -32,6 +33,10 @@ public static class MechanicsDiagnostics
         TrialResult ground=Trial(multi,active,0,1,pureShapeConfig,true,false);
         TrialResult unsupported=Trial(multi,active,0,1,config,false,false);
         TrialResult weakTrial=Trial(weak,active,1,1,pureShapeConfig,true,false);
+        bool groundSupportClassification=
+            SimulationWorld.HasGroundSupport(0.0,0.0f,0.08f)&&
+            SimulationWorld.HasGroundSupport(0.12,0.06f,0.08f)&&
+            !SimulationWorld.HasGroundSupport(4.0,0.60f,0.08f);
         double weakDifference=Vector2.Distance(swimmer.PoseSignature,weakTrial.PoseSignature);
         bool passed=sphere.Distance<1e-6&&zero.Distance<1e-5&&
             reciprocal.Distance<swimmer.Distance*0.75&&swimmer.Distance>1e-4&&
@@ -39,13 +44,15 @@ public static class MechanicsDiagnostics
             activeSphere.Distance>0.1&&activeSphere.Energy>0&&
             unpoweredSphere.Distance<1e-8&&unpoweredSphere.Energy==0&&
             sphere.PositiveSections&&activeSphere.PositiveSections&&unpoweredSphere.PositiveSections&&
+            groundSupportClassification&&
             swimmer.InternalResidual<1e-7&&swimmer.BalanceResidual<1e-7&&
             swimmer.ConnectionLoad>0&&weakDifference>1e-4;
         return new(sphere.Distance,zero.Distance,reciprocal.Distance,swimmer.Distance,
             ground.Distance,unsupported.Distance,swimmer.Energy,swimmer.InternalResidual,
             swimmer.BalanceResidual,swimmer.ConnectionLoad,weakDifference,activeSphere.Distance,passed)
         { UnpoweredSurfaceDisplacement=unpoweredSphere.Distance,
-          PositiveSphereSections=sphere.PositiveSections&&activeSphere.PositiveSections&&unpoweredSphere.PositiveSections };
+          PositiveSphereSections=sphere.PositiveSections&&activeSphere.PositiveSections&&unpoweredSphere.PositiveSections,
+          GroundSupportClassification=groundSupportClassification };
     }
 
     private static TrialResult Trial(Genome genome,ControllerOutputs outputs,double immersion,

@@ -9,6 +9,16 @@ internal static class HeadlessProgram
     {
         try
         {
+            if (args.Contains("--diagnose-shore-causality"))
+            {
+                var result = ShoreCausalityDiagnostics.Run();
+                bool passed = result.MatchedInitialState && result.MatchedGenomesExceptChemicalGain &&
+                    result.ZeroAccessIgnoredExtremeCueGradient && result.PositiveAccessSteeringDifference > 0.01 &&
+                    result.ChemicalGainZero.EverChemicalAccessPositive == 0;
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(passed ? "SHORE CAUSALITY PASS" : "SHORE CAUSALITY FAIL");
+                return passed ? 0 : 1;
+            }
             if (args.Contains("--diagnose-social"))
             {
                 var genetics = SocialSensorGeneticsDiagnostics.Run();
@@ -43,7 +53,8 @@ internal static class HeadlessProgram
             bool diagnosePrecision = args.Contains("--diagnose-precision");
             bool diagnoseWorldPrecision = args.Contains("--diagnose-world-precision");
             bool diagnoseDistribution = args.Contains("--diagnose-mutation-distribution");
-            Options options = Options.Parse(args.Where(a => a != "--diagnose-sphere" && a != "--diagnose-food-web" && a != "--diagnose-land-resources" && a != "--diagnose-sensing-behavior" && a != "--diagnose-photosynthesis" && a != "--diagnose-ecology" && a != "--diagnose-movement" && a != "--diagnose-competition" && a != "--diagnose-tissue" && a != "--diagnose-vision" && a != "--diagnose-appendage" && a != "--diagnose-cavity" && a != "--diagnose-founders" && a != "--diagnose-precision" && a != "--diagnose-world-precision" && a != "--diagnose-mutation-distribution").ToArray());
+            bool diagnoseVerticalMotion = args.Contains("--diagnose-vertical-motion");
+            Options options = Options.Parse(args.Where(a => a != "--diagnose-sphere" && a != "--diagnose-food-web" && a != "--diagnose-land-resources" && a != "--diagnose-sensing-behavior" && a != "--diagnose-photosynthesis" && a != "--diagnose-ecology" && a != "--diagnose-movement" && a != "--diagnose-competition" && a != "--diagnose-tissue" && a != "--diagnose-vision" && a != "--diagnose-appendage" && a != "--diagnose-cavity" && a != "--diagnose-founders" && a != "--diagnose-precision" && a != "--diagnose-world-precision" && a != "--diagnose-mutation-distribution" && a != "--diagnose-vertical-motion").ToArray());
             if (options.ShowHelp)
             {
                 PrintHelp();
@@ -116,6 +127,13 @@ internal static class HeadlessProgram
                 var result = MutationDistributionDiagnostics.Run();
                 Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
                 Console.WriteLine(result.Passed ? "MUTATION DISTRIBUTION PASS" : "MUTATION DISTRIBUTION FAIL");
+                return result.Passed ? 0 : 1;
+            }
+            if (diagnoseVerticalMotion)
+            {
+                VerticalMotionDiagnosticResult result = VerticalMotionDiagnostics.Run();
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result));
+                Console.WriteLine(result.Passed ? "VERTICAL MOTION PASS" : "VERTICAL MOTION FAIL");
                 return result.Passed ? 0 : 1;
             }
             if (diagnoseCompetition)
@@ -397,10 +415,12 @@ internal static class HeadlessProgram
             if (world.Environment.Sample(candidate).WaterDepth == 0) { land = candidate; break; }
         }
         if (land is null || !world.RelocateForMediumDiagnostic(before.Id, land.Value, 0)) return false;
+        System.Numerics.Vector2 landStart = land.Value;
         world.Run(20);
         return world.TryGetOrganism(before.Id, out Organism after) &&
             after.Depth == 0 && after.Immersion < 0.05 && after.Hydration < before.Hydration &&
-            after.DehydrationCostLastStep > 0;
+            after.DehydrationCostLastStep > 0 && after.Body.TotalEnergy > 0 &&
+            SphericalWorld.Distance(landStart, after.Position, world.Config.WorldSize) > 1e-4;
     }
 
     private static bool VerifySealedSurface(ulong seed)
