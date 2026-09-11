@@ -80,6 +80,8 @@ public struct Organism
     public double AppendageSupport;
     public Vector2 AppendageGroundVelocity;
     public double AppendageEnergyLastStep;
+    public double AppendageBodyLift;
+    public List<SoilWaterContact> SoilWaterContacts;
     public CavitySystemState CavityState;
     public double CavityVentilationLastStep;
     public double CavityTissueOxygenLastStep;
@@ -146,6 +148,10 @@ public struct Organism
         AppendageSupport is >=0.0 and <=1.0 &&
         float.IsFinite(AppendageGroundVelocity.X)&&float.IsFinite(AppendageGroundVelocity.Y)&&
         double.IsFinite(AppendageEnergyLastStep)&&AppendageEnergyLastStep>=0.0&&
+        double.IsFinite(AppendageBodyLift)&&AppendageBodyLift>=0.0&&
+        SoilWaterContacts is not null&&SoilWaterContacts.All(contact=>
+            contact.RegionId>=0&&float.IsFinite(contact.Position.X)&&float.IsFinite(contact.Position.Y)&&
+            double.IsFinite(contact.Area)&&contact.Area>=0.0)&&
         CavityState is not null&&CavityState.AllFinite&&
         double.IsFinite(CavityVentilationLastStep)&&double.IsFinite(CavityTissueOxygenLastStep)&&
         double.IsFinite(CavityEnergyLastStep)&&CavityEnergyLastStep>=0.0;

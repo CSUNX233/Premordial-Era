@@ -92,7 +92,14 @@ public sealed partial class Stage3Main : Node3D
             UpdateModeLabel();
         };
         ConnectHudCommands();
-        ResetWorld(24, preRunSteps: 0, "少量祖先 24");
+        if (OS.GetCmdlineUserArgs().Contains("--stage3-land-demo"))
+        {
+            _worldSeed = LandViabilityDiagnostics.DiagnosticSeed;
+            ResetWorld(0, 0, "人工陆生能力测试（非自然进化记录）",
+                LandViabilityDiagnostics.CreateDemonstrationWorld());
+            if (_world.Organisms.Count > 0) SelectAndFocus(_world.Organisms[0].Id);
+        }
+        else ResetWorld(24, preRunSteps: 0, "少量祖先 24");
         UpdateCameraTransform();
         if (OS.GetCmdlineUserArgs().Contains("--stage3-profile-small"))
             RunStage2PerformanceProfile(24, 0);
@@ -349,14 +356,15 @@ public sealed partial class Stage3Main : Node3D
         _hud.FunctionCatalogueRequested += _cataloguePanel.Toggle;
     }
 
-    private void ResetWorld(int ancestors, int preRunSteps, string label)
+    private void ResetWorld(int ancestors, int preRunSteps, string label,
+        SimulationWorld? diagnosticWorld = null)
     {
         StopTracking();
         CompleteSimulationBatch(wait: true);
         _simulationFaulted = false;
         _catalogue.Save();
         _catalogue.BeginWorld();
-        SimulationConfig config = new()
+        SimulationConfig config = diagnosticWorld?.Config ?? new()
         {
             WorldSize = 512f,
             EnvironmentGridSize = 128,
@@ -365,7 +373,7 @@ public sealed partial class Stage3Main : Node3D
             InitialMineralScale = 1.0,
             ResourceBudgetReferenceAncestors = 24
         };
-        _world = new SimulationWorld(config, _worldSeed, ancestors);
+        _world = diagnosticWorld ?? new SimulationWorld(config, _worldSeed, ancestors);
         _hud.SetSeed(_worldSeed);
         _observationTerrain = new ObservationTerrain(_world.Environment, config);
         if (preRunSteps > 0)
@@ -842,7 +850,7 @@ public sealed partial class Stage3Main : Node3D
             $"区域库存（最多显示 6 区）：\n{regionalInventory}\n" +
             $"环境：海底 {organism.Environment.TerrainHeight:F2} · 压力 {organism.Environment.Pressure:F3} · 光 {organism.Environment.Light:F3}\n" +
             $"溶解氧可用度 {organism.Environment.DissolvedOxygenAvailability:F3} · 空气氧可用度 {organism.Environment.AirOxygenAvailability:F3}（均为各介质内部无量纲势）\n" +
-            $"温度 {organism.Environment.Temperature:F3} · 矿物 {organism.Environment.Minerals:F3} · 植被/有机物 {organism.Environment.ProducerBiomass:F3}/{organism.Environment.EdibleOrganics:F3}\n" +
+            $"温度 {organism.Environment.Temperature:F3} · 土壤含水 {organism.Environment.SoilWaterAvailability:P0} · 矿物 {organism.Environment.Minerals:F3} · 植被/有机物 {organism.Environment.ProducerBiomass:F3}/{organism.Environment.EdibleOrganics:F3}\n" +
             $"残骸/废物 {organism.Environment.Detritus:F3}/{organism.Environment.MetabolicWaste:F3}\n" +
             $"速度 ({organism.Velocity.X:F2}, {organism.Velocity.Y:F2}) · 局部反力 ({organism.LocalActuationForce.X:F3}, {organism.LocalActuationForce.Y:F3}) · 力矩 {organism.ActuationTorque:F3}\n" +
             $"控制输出 收缩 {organism.ControllerOutputs.ContractionActivation:F2} / 通透 {organism.ControllerOutputs.PermeabilityGate:F2} / 分泌 {organism.ControllerOutputs.SecretionActivation:F2}\n" +

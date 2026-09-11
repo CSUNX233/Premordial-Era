@@ -44,6 +44,7 @@ public readonly record struct AppendageMechanicsResult(
     double AngularVelocity,
     double EnergySpent,
     double SupportFraction,
+    double BodyLift,
     IReadOnlyList<AppendageRegionPose> Regions,
     IReadOnlyList<AppendageContact> Contacts)
 {
@@ -53,7 +54,8 @@ public readonly record struct AppendageMechanicsResult(
         {
             if (!float.IsFinite(GroundVelocity.X) || !float.IsFinite(GroundVelocity.Y) ||
                 !double.IsFinite(AngularVelocity) || !double.IsFinite(EnergySpent) || EnergySpent < 0 ||
-                !double.IsFinite(SupportFraction) || SupportFraction is < 0 or > 1)
+                !double.IsFinite(SupportFraction) || SupportFraction is < 0 or > 1 ||
+                !double.IsFinite(BodyLift) || BodyLift<0.0)
                 return false;
             for (int index = 0; index < Regions.Count; index++)
                 if (!Regions[index].AllFinite) return false;
@@ -74,7 +76,6 @@ public sealed class AppendageMechanics
     public const int MaximumContacts = 8;
     private const double Gravity = 9.81;
     private const double MinimumConnection = 1e-4;
-    private const double MechanicalEnergyUnitsPerEcosystemEnergy = 30.0;
     private static readonly IComparer<AppendageRegionPose> FootComparer = new DescendingSupportComparer();
     private readonly Dictionary<int, double> _jointPitch = [];
     // Previous body-local planar tips: body translation/heading must not be mistaken for joint slip.
@@ -94,12 +95,15 @@ public sealed class AppendageMechanics
     private readonly double[,] _normal = new double[3, 3];
     private readonly double[] _rhs = new double[3];
     private readonly double[,] _solveMatrix = new double[3, 4];
+    private readonly List<LiftCandidate> _liftCandidates=[];
+    private double _bodyLift;
 
     public void Reset()
     {
         _jointPitch.Clear();
         _previousTips.Clear();
         _previouslyPlanted.Clear();
+        _bodyLift=0.0;
     }
 
     /// <param name="bodyCenterElevation">World-space terrain-axis elevation at body local Y=0.</param>
@@ -135,7 +139,8 @@ public sealed class AppendageMechanics
         {
             _regionPoses.Clear(); _feet.Clear(); _activeContacts.Clear(); _contacts.Clear();
             _previouslyPlanted.Clear(); _previousTips.Clear();
-            return new AppendageMechanicsResult(Vector2.Zero, 0.0, 0.0, 0.0,
+            _bodyLift=0.0;
+            return new AppendageMechanicsResult(Vector2.Zero, 0.0, 0.0, 0.0,0.0,
                 _regionPoses, _contacts);
         }
 
@@ -251,7 +256,8 @@ public sealed class AppendageMechanics
         {
             _feet.Clear(); _activeContacts.Clear(); _contacts.Clear();
             _previouslyPlanted.Clear(); _previousTips.Clear();
-            AppendageMechanicsResult airborne = new(Vector2.Zero, 0.0, energySpent, 0.0,
+            _bodyLift=0.0;
+            AppendageMechanicsResult airborne = new(Vector2.Zero, 0.0, energySpent, 0.0,0.0,
                 _regionPoses, _contacts);
             if (!airborne.AllFinite)
                 throw new InvalidOperationException("Appendage mechanics produced a non-finite state.");
@@ -272,6 +278,7 @@ public sealed class AppendageMechanics
 
         _activeContacts.Clear();
         double requestedWeight = Math.Max(0.05, body.Cache.PhysicalMass) * Gravity;
+        _liftCandidates.Clear();
         foreach (AppendageRegionPose foot in _feet)
         {
             Vector2 localPlanar = new(foot.LocalEnd.X, foot.LocalEnd.Z);
@@ -279,6 +286,38 @@ public sealed class AppendageMechanics
                 worldPosition, Rotate(localPlanar, headingRadians), config.WorldSize);
             EnvironmentSample sample = environment.Sample(footWorld);
             double tipElevation = bodyCenterElevation + foot.LocalEnd.Y;
+            double penetration=sample.TerrainHeight-tipElevation;
+            double supportCapacity=requestedWeight*foot.SupportStrength;
+            if(penetration>0.0&&supportCapacity>1e-9)
+                _liftCandidates.Add(new LiftCandidate(penetration,supportCapacity));
+        }
+        _liftCandidates.Sort(static (left,right)=>right.Penetration.CompareTo(left.Penetration));
+        double targetLift=0.0,cumulativeCapacity=0.0;
+        foreach(LiftCandidate candidate in _liftCandidates)
+        {
+            cumulativeCapacity+=candidate.SupportCapacity;
+            if(cumulativeCapacity+1e-9<requestedWeight)continue;
+            targetLift=candidate.Penetration;
+            break;
+        }
+        if(targetLift>_bodyLift)
+        {
+            // LocalActuationEnergyScale is the existing conversion from mechanical work to
+            // ecosystem energy in BodyMechanics. Use the same conversion for lifting weight.
+            double liftWork=requestedWeight*(targetLift-_bodyLift)*config.LocalActuationEnergyScale;
+            double paid=body.ConsumeEnergy(liftWork);
+            energySpent+=paid;
+            _bodyLift+=liftWork>1e-12?(targetLift-_bodyLift)*Math.Clamp(paid/liftWork,0.0,1.0):0.0;
+        }
+        else _bodyLift=targetLift;
+
+        foreach (AppendageRegionPose foot in _feet)
+        {
+            Vector2 localPlanar = new(foot.LocalEnd.X, foot.LocalEnd.Z);
+            Vector2 footWorld = SphericalWorld.OffsetPosition(
+                worldPosition, Rotate(localPlanar, headingRadians), config.WorldSize);
+            EnvironmentSample sample = environment.Sample(footWorld);
+            double tipElevation = bodyCenterElevation + _bodyLift + foot.LocalEnd.Y;
             BodyPoseRegion sourcePose = _planar[foot.RegionId];
             double tolerance = 0.035 + (0.12 * Math.Max(sourcePose.Width, sourcePose.Thickness));
             bool planted = enableGround && foot.SupportStrength > 1e-5 &&
@@ -294,17 +333,21 @@ public sealed class AppendageMechanics
 
         int plantedCount = 0;
         foreach (ContactWork contact in _activeContacts) if (contact.Planted) plantedCount++;
-        double share = plantedCount > 0 ? requestedWeight / plantedCount : 0.0;
         _contacts.Clear();
         Array.Clear(_normal);
         Array.Clear(_rhs);
         double totalTraction = 0;
         double totalNormalLoad = 0;
         double contactEnergySpent = 0;
+        double plantedCapacity=0.0;
+        foreach(ContactWork contact in _activeContacts)
+            if(contact.Planted)plantedCapacity+=contact.Capacity;
         for (int index = 0; index < _activeContacts.Count; index++)
         {
             ContactWork contact = _activeContacts[index];
-            double normalLoad = contact.Planted ? Math.Min(share, contact.Capacity) : 0.0;
+            double normalLoad = contact.Planted&&plantedCapacity>1e-12
+                ?Math.Min(contact.Capacity,requestedWeight*contact.Capacity/plantedCapacity)
+                :0.0;
             _contacts.Add(new AppendageContact(contact.Foot.RegionId, contact.WorldPosition,
                 contact.TipElevation, contact.TerrainElevation, normalLoad, contact.Friction, contact.Planted));
             totalNormalLoad += normalLoad;
@@ -336,10 +379,10 @@ public sealed class AppendageMechanics
             (double vx, double vy, double requestedAngularVelocity) = Solve3(_normal, _rhs, _solveMatrix);
             Vector2 requestedVelocity = new((float)vx, (float)vy);
             double mass = Math.Max(0.05, body.Cache.PhysicalMass);
-            // Configured work is expressed in the rescaled ecosystem energy unit.
-            // Convert it back to the mechanical unit used by the speed bound.
+            // BodyMechanics charges LocalActuationEnergyScale times mechanical work. Inverting
+            // that same conversion gives the mechanical energy available to this speed bound.
             double energySpeedLimit = Math.Sqrt(Math.Max(0.0,
-                2.0 * MechanicalEnergyUnitsPerEcosystemEnergy * contactEnergySpent / mass));
+                2.0*contactEnergySpent/(config.LocalActuationEnergyScale*mass)));
             double tractionSpeedLimit = totalTraction /
                 (mass * Math.Max(1.0, config.LandFrictionMultiplier));
             double speedLimit = Math.Min(config.MaximumMovementSpeed,
@@ -361,7 +404,7 @@ public sealed class AppendageMechanics
         }
 
         AppendageMechanicsResult result = new(groundVelocity, angularVelocity, energySpent,
-            supportFraction, _regionPoses, _contacts);
+            supportFraction,_bodyLift, _regionPoses, _contacts);
         if (!result.AllFinite)
             throw new InvalidOperationException("Appendage mechanics produced a non-finite state.");
         return result;
@@ -382,6 +425,8 @@ public sealed class AppendageMechanics
         b[1] -= weight * footVelocity.Y;
         b[2] -= weight * ((qx * footVelocity.X) + (qy * footVelocity.Y));
     }
+
+    private readonly record struct LiftCandidate(double Penetration,double SupportCapacity);
 
     private double PathEnergy(AppendageRegionPose foot)
     {

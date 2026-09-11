@@ -2,6 +2,8 @@ using System.Numerics;
 
 namespace NativeEpoch.Simulation;
 
+public readonly record struct SoilWaterContact(int RegionId, Vector2 Position, double Area);
+
 public readonly record struct RegionalExchangeResult(
     double OxygenUptake,
     double OxygenReleased,
@@ -226,7 +228,9 @@ public static class RegionalPhysiology
         double matterDemand = double.NaN,
         MineralReservation? mineralReservation = null,
         OrganicReservation? organicReservation = null,
-        DetritusReservation? detritusReservation = null)
+        DetritusReservation? detritusReservation = null,
+        double? bodyCenterElevationOverride = null,
+        IReadOnlyList<SoilWaterContact>? soilWaterContacts = null)
     {
         double oxygenUptake = 0.0;
         double oxygenReleased = 0.0;
@@ -250,9 +254,9 @@ public static class RegionalPhysiology
         double cosine = Math.Cos(headingRadians);
         double sine = Math.Sin(headingRadians);
         EnvironmentSample centerSample = environment.Sample(organismPosition, depth);
-        double centerElevation = centerSample.WaterDepth > 0.0
+        double centerElevation = bodyCenterElevationOverride ?? (centerSample.WaterDepth > 0.0
             ? centerSample.WaterSurface - depth
-            : centerSample.TerrainHeight + Math.Max(0.08, body.Cache.BoundingRadius * 0.22);
+            : centerSample.TerrainHeight + Math.Max(0.08, body.Cache.BoundingRadius * 0.22));
 
         foreach (BodyFunctionalGeometry geometry in body.FunctionalGeometry)
         {
@@ -265,6 +269,11 @@ public static class RegionalPhysiology
             double oxygenConcentration = oxygenCapacity > 0.0 ? region.Oxygen / oxygenCapacity : 0.0;
             double barrier = 1.0 - (0.78 * genome.Metabolism.WaterRetention);
             double regionalHeatMaintenanceDemand = 0.0;
+            bool hasFootContact = false;
+            if (soilWaterContacts is not null)
+                for (int contactIndex = 0; contactIndex < soilWaterContacts.Count; contactIndex++)
+                    if (soilWaterContacts[contactIndex].RegionId == region.RegionId)
+                    { hasFootContact = true; break; }
 
             for (int surfaceIndex = 0; surfaceIndex < geometry.SurfaceSamples.Count; surfaceIndex++)
             {
@@ -382,8 +391,31 @@ public static class RegionalPhysiology
                         (1.0-0.82*region.BarrierExpression) * vaporDeficit * 0.025 * deltaSeconds);
                     delta = delta with { Water = delta.Water - evaporated };
                     waterLost += evaporated;
+                    if (!hasFootContact && surfaceEnvironment.WaterDepth <= 0.0 &&
+                        elevation <= surfaceEnvironment.TerrainHeight + 0.035 &&
+                        surface.LocalNormal.Y < -0.15)
+                    {
+                        double absorbedWater = WithdrawSoilWater(region, gene, geometry.ExchangeDistance,
+                            region.Water + delta.Water, waterCapacity, surface.AreaWeight,
+                            samplePosition, surfaceEnvironment, environment, deltaSeconds);
+                        delta = delta with { Water = delta.Water + absorbedWater };
+                        waterUptake += absorbedWater;
+                    }
                 }
             }
+            if (hasFootContact && soilWaterContacts is not null)
+                for (int contactIndex = 0; contactIndex < soilWaterContacts.Count; contactIndex++)
+                {
+                    SoilWaterContact contact = soilWaterContacts[contactIndex];
+                    if (contact.RegionId != region.RegionId) continue;
+                    EnvironmentSample contactSample = environment.Sample(contact.Position);
+                    double absorbedWater = WithdrawSoilWater(region, gene, geometry.ExchangeDistance,
+                        region.Water + delta.Water, waterCapacity,
+                        Math.Clamp(contact.Area, 0.0, geometry.ExposedSurface * 0.25),
+                        contact.Position, contactSample, environment, deltaSeconds);
+                    delta = delta with { Water = delta.Water + absorbedWater };
+                    waterUptake += absorbedWater;
+                }
             double heatMaintenancePaid = Math.Min(
                 Math.Max(0.0, region.Energy + delta.Energy), regionalHeatMaintenanceDemand);
             delta = delta with { Energy = delta.Energy - heatMaintenancePaid };
@@ -673,6 +705,18 @@ public static class RegionalPhysiology
         return new RegionalMetabolismResult(
             substrateConsumed, oxygenConsumed, energyProduced, waste,
             maintenancePaid, hypoxia, heatDissipated);
+    }
+
+    private static double WithdrawSoilWater(BodyRegion region, RegionGene gene,
+        double exchangeDistance, double currentWater, double capacity, double contactArea,
+        Vector2 position, EnvironmentSample sample, IMutableEnvironmentField environment, double dt)
+    {
+        if (sample.WaterDepth > 0.0 || contactArea <= 0.0 || capacity <= 0.0) return 0.0;
+        double gradient = Math.Max(0.0, sample.SoilWaterAvailability - currentWater / capacity);
+        double request = contactArea * gene.Permeability * EffectiveExchange(region) *
+            gradient * 0.20 / Math.Max(0.04, exchangeDistance) * dt;
+        return environment.WithdrawSoilWater(position,
+            Math.Min(Math.Max(0.0, capacity - currentWater), Math.Max(0.0, request)));
     }
 
     private static void AddBidirectionalRequest(

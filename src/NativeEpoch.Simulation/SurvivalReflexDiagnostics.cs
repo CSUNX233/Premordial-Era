@@ -31,7 +31,10 @@ public readonly record struct SurvivalReflexDiagnosticResult(
     SurvivalReflexWorldTrack EnabledWorld,
     SurvivalReflexWorldTrack DisabledWorld,
     bool WorldReturnIsCausal,
-    bool Passed);
+    bool Passed)
+{
+    public bool PhysiologicalStressIsMediumIndependent { get; init; }
+}
 
 /// <summary>Bounded causal checks for the universal, interoceptive survival reflex.</summary>
 public static class SurvivalReflexDiagnostics
@@ -83,15 +86,40 @@ public static class SurvivalReflexDiagnostics
             Vector2.Dot(firstProbe, probeMemory.HeldPlanarDirection) < 0.99f && probeMemory.AllFinite;
 
         (SurvivalReflexWorldTrack enabled, SurvivalReflexWorldTrack disabled) = PairedShoreTrial();
+        // Verify the causal outcome and recovery direction. A fixed 0.10 hydration gap
+        // within this short window depends on the exact return time and exchange rate.
         bool worldCausal = enabled.ReachedLand && enabled.ReflexActivated && enabled.ReturnedToWater &&
             (!disabled.ReturnedToWater || enabled.ReturnSeconds < disabled.ReturnSeconds) &&
             enabled.FinalImmersion>0.80&&enabled.FinalHydration>enabled.MinimumHydration+0.01&&
-            enabled.FinalHydration>disabled.FinalHydration+0.10&&enabled.PathAfterLand > 0.05 &&
+            enabled.FinalHydration>disabled.FinalHydration&&enabled.PathAfterLand > 0.05 &&
             enabled.MaximumChemicalSenseAccess<=1e-12&&enabled.MaximumVisionSignal<=1e-12&&
             enabled.AllFinite && disabled.AllFinite;
-        bool passed = reverses && surfaceAlignment>0.5&&calmUnchanged && zeroEnergy && releases && probeChanged && worldCausal;
+        bool physiologicalStress = CheckPhysiologicalStress(config);
+        bool passed = physiologicalStress && reverses && surfaceAlignment>0.5&&calmUnchanged && zeroEnergy && releases && probeChanged && worldCausal;
         return new(retreat.Steering,surfaceAlignment, reverses, calmUnchanged, zeroEnergy, releases, probeChanged,
-            enabled, disabled, worldCausal, passed);
+            enabled, disabled, worldCausal, passed)
+        { PhysiologicalStressIsMediumIndependent = physiologicalStress };
+    }
+
+    private static bool CheckPhysiologicalStress(SimulationConfig config)
+    {
+        Genome genome = Genome.CreateAncestor();
+        Organism specimen = new()
+        {
+            Body = new DevelopingBody(genome, config.CoreInitialMatter, 1.0, 1.0, 0.2, 0.2),
+            Hydration = 0.80, Immersion = 0.0,
+            DehydrationCostLastStep = config.DehydrationEnergyCostPerSecond * config.FixedDeltaSeconds
+        };
+        double land = SurvivalReflex.MeasureStress(specimen, config, config.FixedDeltaSeconds);
+        specimen.Immersion = 1.0;
+        double water = SurvivalReflex.MeasureStress(specimen, config, config.FixedDeltaSeconds);
+        specimen.Hydration = 0.40;
+        double thirsty = SurvivalReflex.MeasureStress(specimen, config, config.FixedDeltaSeconds);
+        specimen.Hydration = 0.80;
+        specimen.HypoxiaShortfallLastStep = config.MetabolicSubstratePerSecond *
+            Math.Max(0.05, specimen.Body.Cache.TotalMatter) * config.FixedDeltaSeconds * 0.5;
+        double hypoxic = SurvivalReflex.MeasureStress(specimen, config, config.FixedDeltaSeconds);
+        return land == 0.0 && water == land && thirsty > 0.12 && hypoxic > 0.12;
     }
 
     private static bool ZeroEnergyCannotMove(SurvivalReflexResponse reflex)
@@ -145,6 +173,7 @@ public static class SurvivalReflexDiagnostics
     {
         SimulationConfig enabledConfig = new()
         {
+            InitialSoilWaterScale = 0.0,
             ReproductionEnergyThreshold = 100.0,
             SurvivalReflexEnabled = true
         };

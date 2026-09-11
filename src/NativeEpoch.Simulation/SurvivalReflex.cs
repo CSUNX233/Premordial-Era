@@ -107,15 +107,16 @@ public static class SurvivalReflex
             Math.Max(0.05, organism.Body.Cache.TotalMatter) * deltaSeconds;
         double hypoxia = Math.Clamp(organism.HypoxiaShortfallLastStep /
             Math.Max(1e-10, maximumAerobicDemand), 0.0, 1.0);
-        double dehydration = Math.Clamp((0.90 - organism.Hydration) / 0.45, 0.0, 1.0);
-        double dryingCost = Math.Clamp(organism.DehydrationCostLastStep /
-            Math.Max(1e-10, config.DehydrationEnergyCostPerSecond * deltaSeconds), 0.0, 1.0);
+        // A partly used water reserve is not yet an emergency. Retention and
+        // exchange traits affect the real inventory; do not equate the paid
+        // cost of living in a medium with failure to survive in that medium.
+        double dehydration = Math.Clamp((0.70 - organism.Hydration) / 0.50, 0.0, 1.0);
         double damageRise = organism.SurvivalMemory.Initialized
             ? Math.Clamp((organism.Body.AverageDamage - organism.SurvivalMemory.PreviousDamage) /
                 Math.Max(1e-8, deltaSeconds / config.HypoxiaFailureSeconds), 0.0, 1.0)
             : 0.0;
         return Math.Clamp(Math.Max(Math.Max(hypoxia, 0.90 * dehydration),
-            Math.Max(0.75 * dryingCost, damageRise)), 0.0, 1.0);
+            damageRise), 0.0, 1.0);
     }
 
     public static SurvivalReflexResponse Update(ref SurvivalReflexMemory memory,

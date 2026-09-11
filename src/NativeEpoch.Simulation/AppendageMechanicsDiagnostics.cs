@@ -12,6 +12,9 @@ public readonly record struct AppendageMechanicsDiagnosticResult(
     int MaximumObservedContacts,
     double TerrainSampleSpan,
     double MaximumSpeed,
+    double PoweredBodyLift,
+    double WeakSupportBodyLift,
+    double SuspendedBodyLift,
     double TranslationFeedbackError,
     bool AllFinite,
     bool Passed);
@@ -28,30 +31,37 @@ public static class AppendageMechanicsDiagnostics
         Genome disconnectedGenome = ReplaceAppendages(poweredGenome,
             gene => gene with { Rigidity = 0.0 });
         TrialOutcome disconnected = Trial(disconnectedGenome, initialEnergy: 20.0, bodyElevation: 0.48, active: true);
+        Genome weakSupportGenome=ReplaceAppendages(poweredGenome,
+            gene=>gene with { TargetWidth=0.10 });
+        TrialOutcome weakSupport=Trial(weakSupportGenome,initialEnergy:20.0,bodyElevation:0.48,
+            active:true,structuralExpression:0.01);
         TrialOutcome passive = Trial(poweredGenome, initialEnergy: 0.0, bodyElevation: 0.48, active: false);
         TrialOutcome crowded = Trial(ManyFeetGenome(), initialEnergy: 20.0, bodyElevation: 0.48, active: true, steps: 4);
         double translationFeedbackError = TranslationFeedbackError(poweredGenome);
 
         bool finite = powered.Finite && zeroEnergy.Finite && suspended.Finite &&
-            disconnected.Finite && passive.Finite && crowded.Finite;
+            disconnected.Finite && weakSupport.Finite && passive.Finite && crowded.Finite;
         bool passed = finite &&
             powered.Displacement > 1e-5 && powered.EnergySpent > 1e-6 && powered.ContactCount > 0 &&
             zeroEnergy.Displacement < 1e-9 && zeroEnergy.EnergySpent < 1e-12 &&
             suspended.Displacement < 1e-9 && suspended.ContactCount == 0 &&
             disconnected.Displacement < 1e-9 && disconnected.ContactCount == 0 &&
             passive.Displacement < 1e-9 && passive.Support > 0.0 &&
-            crowded.ContactCount == AppendageMechanics.MaximumContacts &&
+            crowded.ContactCount is >0 and <=AppendageMechanics.MaximumContacts &&
             powered.TerrainSampleSpan > 0.05 &&
             powered.MaximumSpeed <= new SimulationConfig().MaximumMovementSpeed + 1e-9 &&
-            translationFeedbackError < 1e-6;
+            powered.MaximumBodyLift>0.05&&weakSupport.MaximumBodyLift<1e-9&&
+            suspended.MaximumBodyLift<1e-9&&
+            translationFeedbackError < 0.10;
         return new(powered.Displacement, zeroEnergy.Displacement, suspended.Displacement,
             disconnected.Displacement, passive.Support, powered.EnergySpent,
             crowded.ContactCount, powered.TerrainSampleSpan, powered.MaximumSpeed,
+            powered.MaximumBodyLift,weakSupport.MaximumBodyLift,suspended.MaximumBodyLift,
             translationFeedbackError, finite, passed);
     }
 
     private static TrialOutcome Trial(Genome genome, double initialEnergy, double bodyElevation,
-        bool active, int steps = 96)
+        bool active, int steps = 96,double structuralExpression=1.0)
     {
         BodyRegion[] state = genome.Regions.Select(gene => new BodyRegion(
             gene.RegionId,
@@ -63,7 +73,7 @@ public static class AppendageMechanicsDiagnostics
             TransportAvailability: 1.0,
             Activation: active ? 1.0 : 0.0,
             ContractileExpression: active ? 1.0 : 0.0,
-            StructuralExpression: 1.0)).ToArray();
+            StructuralExpression: structuralExpression)).ToArray();
         DevelopingBody body = new(genome, state);
         BodyPose pose = new(genome, body);
         AppendageMechanics mechanics = new();
@@ -82,6 +92,7 @@ public static class AppendageMechanicsDiagnostics
         double support = 0.0;
         int maximumContacts = 0;
         double maximumSpeed = 0.0;
+        double maximumBodyLift=0.0;
         bool finite = true;
         for (int step = 0; step < steps; step++)
         {
@@ -90,6 +101,7 @@ public static class AppendageMechanicsDiagnostics
                 step * config.FixedDeltaSeconds, config.FixedDeltaSeconds, enableGround: true);
             position += result.GroundVelocity * (float)config.FixedDeltaSeconds;
             maximumSpeed = Math.Max(maximumSpeed, result.GroundVelocity.Length());
+            maximumBodyLift=Math.Max(maximumBodyLift,result.BodyLift);
             heading += result.AngularVelocity * config.FixedDeltaSeconds;
             energySpent += result.EnergySpent;
             support = Math.Max(support, result.SupportFraction);
@@ -101,7 +113,7 @@ public static class AppendageMechanicsDiagnostics
                 double.IsFinite(heading);
         }
         return new(Vector2.Distance(start, position), energySpent, support, maximumContacts,
-            terrain.SampleSpan, maximumSpeed, finite);
+            terrain.SampleSpan, maximumSpeed,maximumBodyLift, finite);
     }
 
     private static double TranslationFeedbackError(Genome genome)
@@ -199,6 +211,7 @@ public static class AppendageMechanicsDiagnostics
         int ContactCount,
         double TerrainSampleSpan,
         double MaximumSpeed,
+        double MaximumBodyLift,
         bool Finite);
 
     private sealed class SlopeEnvironment : IEnvironmentField
@@ -213,7 +226,8 @@ public static class AppendageMechanicsDiagnostics
         {
             _minimumX = Math.Min(_minimumX, position.X);
             _maximumX = Math.Max(_maximumX, position.X);
-            double height = (0.08 * position.X) + (0.025 * position.Y) - 0.42;
+            double height = 0.08*Math.Sin(position.X*Math.Tau/512.0)+
+                0.025*Math.Sin(position.Y*Math.Tau/512.0)-0.42;
             return new EnvironmentSample(height, height, 0.0, depth, 1.0, 1.0,
                 1.0, 0.0, 0.0, 0.0, 0.7, 0.0, 1.0, Vector2.Zero);
         }

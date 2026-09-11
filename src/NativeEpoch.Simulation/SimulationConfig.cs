@@ -8,6 +8,7 @@ public sealed record SimulationConfig
     public double FixedDeltaSeconds { get; init; } = 0.1;
     public int MaxPopulation { get; init; } = 20_000;
     public double InitialMineralScale { get; init; } = 1.0;
+    public double InitialSoilWaterScale { get; init; } = 1.0;
     // Optional preset: changing founder count transfers matter from the same
     // initial environment budget, rather than adding ecosystem resources.
     public int? ResourceBudgetReferenceAncestors { get; init; }
@@ -53,6 +54,7 @@ public sealed record SimulationConfig
     public double ReproductionEnergyThreshold { get; init; } = 1.4;
     public double MaturityAgeSeconds { get; init; } = 22.0;
     public double ReproductionCooldownSeconds { get; init; } = 28.0;
+    public double FounderReproductionCooldownSeconds { get; init; } = 0.0;
     public double SenescenceOnsetSeconds { get; init; } = 600.0;
     public double SenescenceTimeScaleSeconds { get; init; } = 600.0;
     public double SenescenceHazardPerSecond { get; init; } = 0.003;
@@ -96,6 +98,8 @@ public sealed record SimulationConfig
             throw new ArgumentOutOfRangeException(nameof(WorldSize));
         if (EnvironmentGridSize < 2)
             throw new ArgumentOutOfRangeException(nameof(EnvironmentGridSize));
+        if (!double.IsFinite(InitialSoilWaterScale) || InitialSoilWaterScale is <0.0 or >1.0)
+            throw new ArgumentOutOfRangeException(nameof(InitialSoilWaterScale));
         if (!double.IsFinite(TerrainElevationOffset))
             throw new ArgumentOutOfRangeException(nameof(TerrainElevationOffset));
         if (!double.IsFinite(FixedDeltaSeconds) || FixedDeltaSeconds <= 0.0)
@@ -113,6 +117,8 @@ public sealed record SimulationConfig
             throw new ArgumentOutOfRangeException(nameof(InitialAquaticDepthFraction));
         if (!double.IsFinite(MaintenanceFailureSeconds) || MaintenanceFailureSeconds <= 0.0)
             throw new ArgumentOutOfRangeException(nameof(MaintenanceFailureSeconds));
+        if (!double.IsFinite(FounderReproductionCooldownSeconds) || FounderReproductionCooldownSeconds < 0.0)
+            throw new ArgumentOutOfRangeException(nameof(FounderReproductionCooldownSeconds));
         if (CoreInitialMatter <= 0.0)
             throw new InvalidOperationException("A newborn core must contain positive matter.");
         if (ReproductionEnergyCost < NewbornEnergy)

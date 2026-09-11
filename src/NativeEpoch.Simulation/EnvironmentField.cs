@@ -22,6 +22,7 @@ public readonly record struct EnvironmentSample(
     public double LandPlantBiomass { get; init; }
     public double AlgaeBiomass { get; init; }
     public double EdibleOrganics { get; init; }
+    public double SoilWaterAvailability { get; init; }
     public double ProducerBiomass => LandPlantBiomass + AlgaeBiomass;
 }
 
@@ -50,6 +51,8 @@ public interface IMutableEnvironmentField : IEnvironmentField
     void DepositDetritus(Vector2 position, double amount);
     void DepositMetabolicWaste(Vector2 position, double amount);
     double WithdrawOxygen(Vector2 position, float depth, double immersion, double requestedAmount);
+    double WithdrawSoilWater(Vector2 position, double requestedAmount) => 0.0;
+    double TotalSoilWater => 0.0;
     void DepositOxygen(Vector2 position, float depth, double immersion, double amount);
     void UpdateOxygen(double deltaSeconds);
     void UpdateMatterCycles(double deltaSeconds);
@@ -91,6 +94,8 @@ public sealed record EnvironmentResourceSnapshot(
 {
     public double[] CellAreas { get; init; } = [];
     public double OceanAreaFraction { get; init; }
+    public double[] SoilWater { get; init; } = [];
+    public double[] SoilWaterCapacity { get; init; } = [];
     public static EnvironmentResourceSnapshot Empty { get; } = new(
         0, 0f, 0.0, [], [], [], [], [], [], [], []);
 }
@@ -221,6 +226,8 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
     private readonly double[] _detritus;
     private readonly double[] _metabolicWaste;
     private readonly double[] _moisture;
+    private readonly double[] _soilWater;
+    private readonly double[] _soilWaterCapacity;
     private readonly Vector2[] _flow;
     private readonly double[] _dissolvedOxygen;
     private readonly double[] _dissolvedOxygenCapacity;
@@ -263,6 +270,8 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         _detritus = new double[count];
         _metabolicWaste = new double[count];
         _moisture = new double[count];
+        _soilWater = new double[count];
+        _soilWaterCapacity = new double[count];
         _flow = new Vector2[count];
         _dissolvedOxygen = new double[count];
         _dissolvedOxygenCapacity = new double[count];
@@ -368,6 +377,13 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         if (Math.Abs(config.TerrainElevationOffset) <= 1e-12)
             CalibrateSeaLevel(targetOceanAreaFraction, radius);
         InitializeInventories(config.InitialMineralScale);
+        for (int index = 0; index < count; index++)
+        {
+            if (_terrain[index] <= 0.0) continue;
+            _soilWaterCapacity[index] = _cellAreas[index] * 0.40;
+            _soilWater[index] = _soilWaterCapacity[index] * config.InitialSoilWaterScale *
+                Math.Clamp((_moisture[index] - 0.35) / 0.55, 0.0, 1.0);
+        }
         OceanAreaFraction = CalculateOceanAreaFraction();
         SeedProducers(config.InitialMineralScale);
     }
@@ -410,6 +426,8 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
     public double TotalEnvironmentMatter => TotalMinerals + TotalOrganicMatter;
     public double OceanAreaFraction { get; private set; }
     public double TotalOxygen => Sum(_dissolvedOxygen) + Sum(_airOxygen);
+    public double TotalSoilWater => Sum(_soilWater);
+    public double CumulativeSoilWaterUptake { get; private set; }
     public double CumulativeExternalOxygenSupply { get; private set; }
 
     public bool AllFinite =>
@@ -426,6 +444,9 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         _detritus.All(value => double.IsFinite(value) && value >= 0.0) &&
         _metabolicWaste.All(value => double.IsFinite(value) && value >= 0.0) &&
         _moisture.All(value => double.IsFinite(value) && value >= 0.0) &&
+        _soilWater.All(value => double.IsFinite(value) && value >= 0.0) &&
+        _soilWaterCapacity.All(value => double.IsFinite(value) && value >= 0.0) &&
+        double.IsFinite(CumulativeSoilWaterUptake) && CumulativeSoilWaterUptake >= 0.0 &&
         _dissolvedOxygen.All(value => double.IsFinite(value) && value >= 0.0) &&
         _airOxygen.All(value => double.IsFinite(value) && value >= 0.0) &&
         _lightEnergyBudget.All(value => double.IsFinite(value) && value >= 0.0) &&
@@ -460,7 +481,9 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         {
             LandPlantBiomass = Interpolate(_landPlants, quad),
             AlgaeBiomass = Interpolate(_algae, quad),
-            EdibleOrganics = Interpolate(_edibleOrganics, quad)
+            EdibleOrganics = Interpolate(_edibleOrganics, quad),
+            SoilWaterAvailability = terrain > 0.0
+                ? Availability(_soilWater, _soilWaterCapacity, quad) : 0.0
         };
     }
 
@@ -485,8 +508,21 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
             (double[])_metabolicWaste.Clone())
         {
             CellAreas = (double[])_cellAreas.Clone(),
-            OceanAreaFraction = OceanAreaFraction
+            OceanAreaFraction = OceanAreaFraction,
+            SoilWater = (double[])_soilWater.Clone(),
+            SoilWaterCapacity = (double[])_soilWaterCapacity.Clone()
         };
+    }
+
+    public double WithdrawSoilWater(Vector2 position, double requestedAmount)
+    {
+        if (!double.IsFinite(requestedAmount) || requestedAmount < 0.0)
+            throw new ArgumentOutOfRangeException(nameof(requestedAmount));
+        CellQuad quad = Locate(position);
+        if (Interpolate(_terrain, quad) <= 0.0) return 0.0;
+        double received = Withdraw(_soilWater, quad, requestedAmount);
+        CumulativeSoilWaterUptake += received;
+        return received;
     }
 
     public double WithdrawMatter(Vector2 position, double requestedAmount)
@@ -1273,7 +1309,7 @@ public sealed class BilinearEnvironmentField : IMutableEnvironmentField
         const ulong prime = 1099511628211UL;
         ulong hash = offset;
         Append(_minerals); Append(_landPlants); Append(_algae); Append(_edibleOrganics);
-        Append(_detritus); Append(_metabolicWaste);
+        Append(_detritus); Append(_metabolicWaste); Append(_soilWater);
         return hash;
 
         void Append(double[] values)
